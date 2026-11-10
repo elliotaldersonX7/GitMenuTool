@@ -369,10 +369,16 @@ static bool StatUrlAt(HWND h, int x, int y) {
     size_t p = text.find(g_statUrl);
     if (p == std::wstring::npos) return false;
     size_t uLen = g_statUrl.size();
-    // 几何判定：锚定 URL 首末字符的位置（不用行尾符号——\r 的 pos 会落到下一行）
+    // 关键：GetWindowText 的索引按 \r\n（每换行 2 字符）计，richedit 内部按 \r（1 字符）计，
+    // 外部索引必须减去之前的换行数，否则 EM_POSFROMCHAR 会落到下一行
+    int breaks = 0;
+    for (size_t i = 0; i < p && i < text.size(); ++i) if (text[i] == L'\n') ++breaks;
+    int iStart = (int)p - breaks;
+    int iEnd = iStart + (int)uLen - 1;
+    // 几何判定：锚定 URL 首末字符的位置
     POINTL p0 = { 0, 0 }, p1 = { 0, 0 };
-    SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&p0, (LPARAM)(int)p);
-    SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&p1, (LPARAM)(int)(p + uLen - 1));
+    SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&p0, (LPARAM)iStart);
+    SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&p1, (LPARAM)iEnd);
     HDC dc = GetDC(h);
     HFONT of = (HFONT)SelectObject(dc, g_fontUI);
     TEXTMETRICW tm;
@@ -400,6 +406,15 @@ static LRESULT CALLBACK RichBaseSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
             SetCursor(LoadCursor(nullptr, IDC_HAND));
             return TRUE;
         }
+    }
+    if (m == WM_MOUSEMOVE && h == g_stat) {
+        // RichEdit 内部会在 mousemove 里把光标改回 I 形，覆盖 WM_SETCURSOR 的手型——
+        // 命中 URL 时设手型且不把 mousemove 转发给控件
+        POINT pt; GetCursorPos(&pt);
+        ScreenToClient(h, &pt);
+        bool over = StatUrlAt(h, pt.x, pt.y);
+        SetCursor(LoadCursor(nullptr, over ? IDC_HAND : IDC_IBEAM));
+        return 0;
     }
     if (m == WM_LBUTTONDOWN && h == g_stat) {
         g_statDown.x = (short)LOWORD(l);
