@@ -723,21 +723,31 @@ static void Info(HWND parent, const std::wstring& msg) { MessageBoxW(parent, msg
 // 居中输入弹窗：OK 返回文本，取消返回 nullopt（对应 Python 版 ask）
 static std::optional<std::wstring> AskText(HWND parent, const wchar_t* title, const std::wstring& label, const std::wstring& def = L"") {
     std::optional<std::wstring> result;
-    int w = (int)(470 * g_scale), h = (int)(160 * g_scale);
+    int m = (int)(14 * g_scale), bw = (int)(80 * g_scale);
+    // 标签支持多行（清空Git重来的确认说明很长），行数决定标签高度
+    int lines = 1;
+    for (wchar_t c : label) if (c == L'\n') ++lines;
+    int lblH = lines * (int)(24 * g_scale) + (int)(6 * g_scale);
+    int editH = (int)(24 * g_scale), btnH = (int)(28 * g_scale);
+    // 客户区高度按内容反推，再用 AdjustWindowRectEx 补上标题栏/边框——
+    // 否则窗口高度不含标题栏，底部按钮会被裁掉下半截
+    int ch = m + lblH + (int)(10 * g_scale) + editH + (int)(16 * g_scale) + btnH + m;
+    RECT rcFrame = { 0, 0, (int)(470 * g_scale), ch };
+    AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    int w = rcFrame.right - rcFrame.left, h = rcFrame.bottom - rcFrame.top;
     RECT pr; GetWindowRect(parent, &pr);
     int x = pr.left + ((pr.right - pr.left) - w) / 2, y = pr.top + ((pr.bottom - pr.top) - h) / 2;
     if (x < 0) x = 0; if (y < 0) y = 0;
     HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", title,
         WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, w, h, parent, nullptr, g_hInst, nullptr);
-    int m = (int)(14 * g_scale), bw = (int)(80 * g_scale);
     HWND hLabel = CreateWindowExW(0, L"STATIC", label.c_str(), WS_CHILD | WS_VISIBLE,
-        m, m, w - 2 * m, (int)(42 * g_scale), dlg, nullptr, g_hInst, nullptr);
+        m, m, w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
     HWND hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", def.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        m, m + (int)(46 * g_scale), w - 2 * m, (int)(24 * g_scale), dlg, (HMENU)100, g_hInst, nullptr);
+        m, m + lblH + (int)(10 * g_scale), w - 2 * m, editH, dlg, (HMENU)100, g_hInst, nullptr);
     HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-        w - 2 * bw - m, h - (int)(44 * g_scale), bw, (int)(28 * g_scale), dlg, (HMENU)IDOK, g_hInst, nullptr);
+        w - 2 * bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
     HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-        w - bw - m, h - (int)(44 * g_scale), bw, (int)(28 * g_scale), dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
+        w - bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
     SendMessageW(hLabel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hEdit, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hOk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
