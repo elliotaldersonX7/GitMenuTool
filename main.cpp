@@ -346,13 +346,57 @@ static Seg SegT(const std::wstring& t, COLORREF c, bool b = false, COLORREF back
 static Seg SegM(const std::wstring& t, COLORREF c, bool b = false) {   // 输出区等宽字体
     Seg s; s.text = t; s.color = c; s.bold = b; s.back = 0; s.link = false; s.face = L"Consolas"; s.pt = 10; return s;
 }
-static void LoadMsftEdit() { LoadLibraryW(L"Riched20.dll"); }   // RichEdit20W：支持 EM_SETBKCOLOR 黑底（Msftedit 新系统会忽略）
+// RichEdit 底色：EM_SETBKCOLOR 新系统不可靠——三层组合拳：
+// ① GWLP_USERDATA 存底色；② WM_ERASEBKGND 自绘擦背景；③ WM_PAINT 里 RichEdit 画完文字后，
+//    用最后一个字符的行底位置把下方空白补成底色（riched20 空白区强制白底，只能这样盖）
+static LRESULT CALLBACK RichBaseSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR) {
+    if (m == WM_ERASEBKGND) {
+        RECT rc; GetClientRect(h, &rc);
+        HBRUSH b = CreateSolidBrush((COLORREF)GetWindowLongPtrW(h, GWLP_USERDATA));
+        FillRect((HDC)w, &rc, b);
+        DeleteObject(b);
+        return 1;
+    }
+    if (m == WM_PAINT) {
+        DefSubclassProc(h, m, w, l);   // RichEdit 先自绘文字
+        COLORREF base = (COLORREF)GetWindowLongPtrW(h, GWLP_USERDATA);
+        HDC dc = GetDC(h);
+        RECT rc; GetClientRect(h, &rc);
+        int len = GetWindowTextLengthW(h);
+        int yTop = 0;
+        if (len > 0) {
+            POINTL pl = { 0, 0 };
+            SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&pl, (LPARAM)(len - 1));
+            int lh = (int)(10 * g_scale * 2);   // 行高兜底值
+            HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+            if (f) {
+                HDC tdc = GetDC(h);
+                HFONT of = (HFONT)SelectObject(tdc, f);
+                TEXTMETRICW tm;
+                if (GetTextMetricsW(tdc, &tm)) lh = tm.tmHeight + tm.tmExternalLeading;
+                SelectObject(tdc, of);
+                ReleaseDC(h, tdc);
+            }
+            yTop = pl.y + lh;   // 最后一行的行底
+        }
+        if (yTop < rc.bottom) {
+            RECT fr = { rc.left, yTop, rc.right, rc.bottom };
+            HBRUSH b = CreateSolidBrush(base);
+            FillRect(dc, &fr, b);
+            DeleteObject(b);
+        }
+        ReleaseDC(h, dc);
+        return 0;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
 static HWND NewRich(HWND parent, HMENU id, COLORREF bk) {
     HWND h = CreateWindowExW(WS_EX_CLIENTEDGE, RICHEDIT_CLASS, nullptr,
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_READONLY | ES_MULTILINE,
         0, 0, 0, 0, parent, id, g_hInst, nullptr);
     SendMessageW(h, EM_SETEVENTMASK, 0, ENM_LINK);   // 链接点击需要 ENM_LINK
-    SendMessageW(h, EM_SETBKCOLOR, 0, (LPARAM)bk);
+    SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)bk);   // 控件底色
+    SetWindowSubclass(h, RichBaseSub, 1, 0);
     return h;
 }
 static void RichAppend(HWND h, const std::vector<Seg>& segs) {
@@ -361,8 +405,8 @@ static void RichAppend(HWND h, const std::vector<Seg>& segs) {
     SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&cr);
     for (auto& s : segs) {
         CHARFORMAT2W cf = { sizeof(cf) };
-        cf.dwMask = CFM_COLOR | CFM_BOLD | CFM_FACE | CFM_SIZE;
-        if (s.back) { cf.dwMask |= CFM_BACKCOLOR; cf.crBackColor = s.back; }
+        cf.dwMask = CFM_COLOR | CFM_BOLD | CFM_FACE | CFM_SIZE | CFM_BACKCOLOR;
+        cf.crBackColor = s.back ? s.back : (COLORREF)GetWindowLongPtrW(h, GWLP_USERDATA);   // 无胶囊底色时用控件底色
         if (s.link) { cf.dwMask |= CFM_LINK; }
         cf.dwEffects = 0;
         if (s.bold) cf.dwEffects |= CFE_BOLD;
@@ -1630,7 +1674,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_hInst = hInst;
     MakeDpiAware();
     InitCommonControls();
-    LoadMsftEdit();
+    LoadLibraryW(L"Riched20.dll");   // RichEdit 控件库（RICHEDIT_CLASS）
     g_git = FindExe(L"git");
     if (g_git.empty()) { MessageBoxW(nullptr, L"未检测到 Git，请先安装 Git for Windows。", APP_TITLE, MB_ICONERROR); return 1; }
     g_gh = FindExe(L"gh");
@@ -1664,7 +1708,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     int x = std::max(0, (GetSystemMetrics(SM_CXSCREEN) - W) / 2);
     int y = std::max(0, (GetSystemMetrics(SM_CYSCREEN) - H) / 2);
     g_main = CreateWindowExW(0, L"GIT_MENU_MAIN", APP_TITLE,
-                             WS_OVERLAPPEDWINDOW, x, y, W, H, nullptr, nullptr, hInst, nullptr);
+                             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,   // 主窗不擦子控件区，否则白底盖住 RichEdit 黑底
+                             x, y, W, H, nullptr, nullptr, hInst, nullptr);
     // 顶栏两个 STATIC（Layout 引用 g_topStatics）
     g_topStatics[0] = MkStatic(g_main, L"操作目录:", 0, 0, 0, 0, 0, g_fontUI);
     g_topStatics[1] = MkStatic(g_main, L">_", 0, 0, 0, 0, 0, g_fontMono);
