@@ -338,12 +338,12 @@ static const COLORREF BG_GRY = RGB(0xec, 0xec, 0xec);
 static const COLORREF BG_BLU = RGB(0xe8, 0xf0, 0xfe);
 static const COLORREF BG_YLW = RGB(0xfe, 0xf7, 0xe0);
 
-struct Seg { std::wstring text; COLORREF color; bool bold; COLORREF back; bool link; const wchar_t* face; };
+struct Seg { std::wstring text; COLORREF color; bool bold; COLORREF back; bool link; const wchar_t* face; int pt; };
 static Seg SegT(const std::wstring& t, COLORREF c, bool b = false, COLORREF back = 0, bool link = false) {
-    Seg s; s.text = t; s.color = c; s.bold = b; s.back = back; s.link = link; s.face = L"Segoe UI"; return s;
+    Seg s; s.text = t; s.color = c; s.bold = b; s.back = back; s.link = link; s.face = L"Segoe UI"; s.pt = 9; return s;
 }
 static Seg SegM(const std::wstring& t, COLORREF c, bool b = false) {   // 输出区等宽字体
-    Seg s; s.text = t; s.color = c; s.bold = b; s.back = 0; s.link = false; s.face = L"Consolas"; return s;
+    Seg s; s.text = t; s.color = c; s.bold = b; s.back = 0; s.link = false; s.face = L"Consolas"; s.pt = 10; return s;
 }
 static void LoadMsftEdit() { LoadLibraryW(L"Msftedit.dll"); }
 static HWND NewRich(HWND parent, HMENU id, COLORREF bk) {
@@ -368,7 +368,7 @@ static void RichAppend(HWND h, const std::vector<Seg>& segs) {
         if (s.link) cf.dwEffects |= CFE_LINK;
         cf.crTextColor = s.color;
         lstrcpynW(cf.szFaceName, s.face, LF_FACESIZE);
-        cf.yHeight = (int)(11 * 20 * g_scale);
+        cf.yHeight = s.pt * 20;   // twips：1pt=20twips，RichEdit 随系统 DPI 自行缩放，不能再乘 g_scale
         SendMessageW(h, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
         SendMessageW(h, EM_REPLACESEL, FALSE, (LPARAM)s.text.c_str());
     }
@@ -1373,35 +1373,49 @@ static void Layout() {
     int W = rc.right, H = rc.bottom;
     int m = (int)(6 * g_scale);
     int topH = (int)(32 * g_scale), rowH = (int)(30 * g_scale);
-    int statH = (int)(120 * g_scale), cmdH = (int)(28 * g_scale);
+    int statH = (int)(150 * g_scale), cmdH = (int)(28 * g_scale);
     int leftW = (int)(244 * g_scale);
     // 顶栏
-    MoveWindow(g_topStatics[0], m, m + 4, (int)(60 * g_scale), 20, TRUE);
-    MoveWindow(g_editDir, m + (int)(64 * g_scale), m, W - leftW - (int)(260 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(g_topStatics[0], m + (int)(2 * g_scale), m + 5, (int)(64 * g_scale), 20, TRUE);
+    MoveWindow(g_editDir, m + (int)(70 * g_scale), m, W - leftW - (int)(260 * g_scale), (int)(24 * g_scale), TRUE);
     // 打开 / 清空输出 放右端
-    // 重新枚举定位：直接按序号排
     HWND open = GetDlgItem(g_main, IDC_PICKDIR), clear = GetDlgItem(g_main, IDC_CLEAROUT);
     MoveWindow(open, W - (int)(230 * g_scale), m, (int)(64 * g_scale), (int)(24 * g_scale), TRUE);
     MoveWindow(clear, W - (int)(158 * g_scale), m, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
-    MoveWindow(g_topStatics[0], m, m + 5, (int)(60 * g_scale), 20, TRUE);
     // 左栏
     MoveWindow(g_leftPanel, 0, topH + m, leftW, H - topH - m, TRUE);
     int rightX = leftW + m, rightW = W - rightX - m;
-    // 状态按钮行（7 个常用 + 右端危险）
+    // 状态按钮行：宽度按文字实测分配，避免小字被截断
     int y = topH + m;
-    HWND btns[6] = { GetDlgItem(g_main, IDC_REFRESH), GetDlgItem(g_main, IDC_GLOBALCFG), GetDlgItem(g_main, IDC_INIT),
-                     GetDlgItem(g_main, IDC_RELEASE), GetDlgItem(g_main, IDC_IGNORE), GetDlgItem(g_main, IDC_OPENIGN) };
-    HWND reset = GetDlgItem(g_main, IDC_RESET);
-    int seg = rightW / 7;
-    for (int i = 0; i < 6; ++i) MoveWindow(btns[i], rightX + i * seg, y, seg - (int)(4 * g_scale), rowH, TRUE);
-    MoveWindow(reset, rightX + 6 * seg, y, rightW - 6 * seg - (int)(4 * g_scale), rowH, TRUE);
+    int idsSbar[7] = { IDC_REFRESH, IDC_GLOBALCFG, IDC_INIT, IDC_RELEASE, IDC_IGNORE, IDC_OPENIGN, IDC_RESET };
+    int wtxt[7]; int total = 0;
+    HDC dc = GetDC(g_main);
+    HFONT of = (HFONT)SelectObject(dc, g_fontUI);
+    SIZE sz;
+    for (int i = 0; i < 7; ++i) {
+        wchar_t t[64]; GetDlgItemTextW(g_main, idsSbar[i], t, 64);
+        GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
+        wtxt[i] = sz.cx + (int)(22 * g_scale);
+        total += wtxt[i];
+    }
+    SelectObject(dc, of);
+    ReleaseDC(g_main, dc);
+    total += 6 * (int)(4 * g_scale);
+    int avail = rightW - (int)(8 * g_scale);
+    double fit = total > avail ? (double)avail / total : 1.0;
+    int x2 = rightX;
+    for (int i = 0; i < 7; ++i) {
+        int w2 = (int)(wtxt[i] * fit) - (int)(4 * g_scale);
+        MoveWindow(GetDlgItem(g_main, idsSbar[i]), x2, y, w2, rowH, TRUE);
+        x2 += w2 + (int)(4 * g_scale);
+    }
     // 状态卡
     y += rowH + (int)(4 * g_scale);
     MoveWindow(g_stat, rightX, y, rightW, statH, TRUE);
     // 命令输入行
     y += statH + (int)(4 * g_scale);
-    MoveWindow(g_topStatics[1], rightX, y + 5, (int)(18 * g_scale), 20, TRUE);
-    MoveWindow(g_cmdEdit, rightX + (int)(24 * g_scale), y, rightW - (int)(94 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(g_topStatics[1], rightX, y + 5, (int)(30 * g_scale), 20, TRUE);
+    MoveWindow(g_cmdEdit, rightX + (int)(34 * g_scale), y, rightW - (int)(104 * g_scale), (int)(24 * g_scale), TRUE);
     MoveWindow(GetDlgItem(g_main, IDC_CMDRUN), rightX + rightW - (int)(64 * g_scale), y, (int)(64 * g_scale), (int)(24 * g_scale), TRUE);
     // 输出区
     y += cmdH + (int)(6 * g_scale);
@@ -1547,7 +1561,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
                              WS_OVERLAPPEDWINDOW, x, y, W, H, nullptr, nullptr, hInst, nullptr);
     // 顶栏两个 STATIC（Layout 引用 g_topStatics）
     g_topStatics[0] = MkStatic(g_main, L"操作目录:", 0, 0, 0, 0, 0, g_fontUI);
-    g_topStatics[1] = MkStatic(g_main, L"$", 0, 0, 0, 0, 0, g_fontMono);
+    g_topStatics[1] = MkStatic(g_main, L">_", 0, 0, 0, 0, 0, g_fontMono);
     BuildControls();
     ShowWindow(g_main, nCmdShow);
     UpdateWindow(g_main);
