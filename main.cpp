@@ -1269,7 +1269,7 @@ static HWND MkStatic(HWND parent, const wchar_t* text, int id, int x, int y, int
     SetWindowLongPtrW(c, GWLP_USERDATA, (LONG_PTR)y);
     return c;
 }
-// 左侧面板子控件按"基准 y - 滚动量"重定位
+// 左侧面板子控件按"基准 y - 滚动量"重定位；随后只重绘暴露区（配合 WS_CLIPCHILDREN 消残影）
 static void RepositionLeftChildren(HWND h) {
     EnumChildWindows(h, [](HWND c, LPARAM)->BOOL {
         int baseY = (int)GetWindowLongPtrW(c, GWLP_USERDATA);
@@ -1277,6 +1277,7 @@ static void RepositionLeftChildren(HWND h) {
         MoveWindow(c, r.left, baseY - g_leftScroll, r.right - r.left, r.bottom - r.top, TRUE);
         return TRUE;
     }, 0);
+    InvalidateRect(h, nullptr, FALSE);
 }
 // 滚动条几何：nMax=内容总高、nPage=可视高，滑块到底才会真正到底
 static void UpdateLeftScroll(HWND h) {
@@ -1354,7 +1355,7 @@ static void BuildControls() {
     g_cmdEditProc = (WNDPROC)SetWindowLongPtrW(g_cmdEdit, GWLP_WNDPROC, (LONG_PTR)CmdEditSubProc);
     MkBtn(g_main, L"运行", IDC_CMDRUN, 0, 0, 0, 0, g_fontUI);
     // 左侧面板
-    g_leftPanel = CreateWindowExW(0, L"GIT_LEFT", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+    g_leftPanel = CreateWindowExW(0, L"GIT_LEFT", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
                                   0, 0, 0, 0, g_main, (HMENU)IDC_LEFT, g_hInst, nullptr);
     int y = (int)(4 * g_scale);
     int pw = (int)(182 * g_scale);
