@@ -921,8 +921,10 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     if (!g_remote.empty()) {
         lines->push_back({ SegT(L"远端名称(本地别名)：", STAT_TXT, true), SegT(L" " + g_remote + L" ", STAT_TXT, false, BG_GRY) });
         g_statUrl = Trim(GitOut({ L"config", L"--get", L"remote." + g_remote + L".url" }));
+        // URL 不用链接样式（CFE_LINK 自带下划线会盖住 _ 等基线字符，显示成空格）；
+        // 可点击性放在 ↗ 图标上，点击直接打开 g_statUrl
         lines->push_back({ SegT(L"远端地址：", STAT_TXT, true), SegT(L"  ", STAT_TXT),
-                           SegT(g_statUrl.empty() ? L"（未取到）" : g_statUrl, STAT_BLU, false, 0, !g_statUrl.empty()),
+                           SegT(g_statUrl.empty() ? L"（未取到）" : g_statUrl, STAT_BLU),
                            SegT(L" ↗", STAT_BLU, false, 0, !g_statUrl.empty()) });
     } else {
         g_statUrl.clear();
@@ -1849,17 +1851,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         NMHDR* nm = (NMHDR*)l;
         if (nm->code == EN_LINK) {
             ENLINK* el = (ENLINK*)l;
-            if (el->msg == WM_LBUTTONUP) {
-                int len = el->chrg.cpMax - el->chrg.cpMin;
-                if (len > 0 && len < 2048) {
-                    std::wstring url(len, L'\0');
-                    TEXTRANGEW tr; tr.chrg = el->chrg; tr.lpstrText = &url[0];
-                    SendMessageW(nm->hwndFrom, EM_GETTEXTRANGE, 0, (LPARAM)&tr);
-                    url.resize(wcslen(url.c_str()));
-                    if (url.rfind(L"http", 0) == 0)
-                        ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-                }
-            }
+            if (el->msg == WM_LBUTTONUP && !g_statUrl.empty())
+                ShellExecuteW(nullptr, L"open", g_statUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         }
         return 0;
     }
