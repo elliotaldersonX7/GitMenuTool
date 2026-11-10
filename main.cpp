@@ -471,7 +471,10 @@ static void RichAppendLine(HWND h, const std::vector<Seg>& segs) {
         CHARRANGE crMark = { cr.cpMax - 1, cr.cpMax };   // 行尾 \r
         SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&crMark);
         CHARFORMAT2W cf = { sizeof(cf) };
-        cf.dwMask = CFM_COLOR | CFM_BACKCOLOR | CFM_FACE | CFM_SIZE;
+        // CFM_EFFECTS + dwEffects=0：显式清掉段落标记继承的链接/加粗等效果，
+        // 否则行尾整片区域的点击都会被当成链接（吸附范围异常扩大）
+        cf.dwMask = CFM_COLOR | CFM_BACKCOLOR | CFM_FACE | CFM_SIZE | CFM_EFFECTS;
+        cf.dwEffects = 0;
         cf.crBackColor = (COLORREF)GetWindowLongPtrW(h, GWLP_USERDATA);
         cf.crTextColor = CLR_TXT;
         lstrcpynW(cf.szFaceName, L"Consolas", LF_FACESIZE);
