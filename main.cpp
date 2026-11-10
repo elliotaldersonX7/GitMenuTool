@@ -693,6 +693,7 @@ static void HandleSpecial(const std::vector<std::wstring>& argv);
 static void ExecAsync(std::vector<JobCmd> cmds) {
     bool expected = false;
     if (!g_busy.compare_exchange_strong(expected, true)) {
+        { FILE* f = fopen("C:/Users/liuao/.codebuddy/work/git_tool_cpp/exec_debug.log", "a"); if (f) { fprintf(f, "[ExecAsync] BUSY-REJECT"); fputc(10, f); fclose(f); } }
         MessageBoxW(g_main, L"上一个操作还在运行，请稍候。", L"提示", MB_OK | MB_ICONINFORMATION);
         return;
     }
@@ -1014,8 +1015,11 @@ static bool EnsureRepo() {
     return false;
 }
 static bool NeedRemote() {
-    if (!g_remote.empty()) return true;
-    Warn(g_main, L"该仓库尚未配置远端。\n请先点【配置远程+首次推送】添加远端并完成首次推送，\n再使用推送/拉取等与远端相关的操作。");
+    // 返回 true = 已弹窗提示且调用方应中止；false = 有远端，继续执行
+    if (g_remote.empty()) {
+        Warn(g_main, L"该仓库尚未配置远端。\n请先点【配置远程+首次推送】添加远端并完成首次推送，\n再使用推送/拉取等与远端相关的操作。");
+        return true;
+    }
     return false;
 }
 static std::wstring CurBranch() {
@@ -1061,7 +1065,7 @@ static void OpShow() {
 }
 // 推送核心序列（OpPush 与"更换远端后首推"共用）：无上游→fetch 后检查无关历史并询问强推
 static void DoPushCore(bool withTags) {
-    if (!EnsureRepo() || !NeedRemote()) return;
+    if (!EnsureRepo() || NeedRemote()) return;
     std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     std::wstring br = CurBranch();
     GitOut({ L"fetch", L"--quiet", g_remote }, 120000);
@@ -1087,7 +1091,7 @@ static void DoPushCore(bool withTags) {
     ExecV(cmds);
 }
 static void OpPush() {
-    if (!EnsureRepo() || !NeedRemote()) return;
+    if (!EnsureRepo() || NeedRemote()) return;
     std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     if (!up.empty()) { Exec({ G({ L"push" }) }); return; }
     DoPushCore(false);
@@ -1117,7 +1121,7 @@ static void OpRemoteAdd() {
     ExecV(cmds);
 }
 static void OpRemoteUrl() {
-    if (!EnsureRepo() || !NeedRemote()) return;
+    if (!EnsureRepo() || NeedRemote()) return;
     std::vector<std::wstring> rems;
     for (auto& l : SplitLines(GitOut({ L"remote" }))) { std::wstring t = Trim(l); if (!t.empty()) rems.push_back(t); }
     if (rems.empty()) return;
@@ -1137,7 +1141,7 @@ static void OpRemoteUrl() {
     ExecV({ G({ L"remote", L"set-url", rn, *url }), G({ L"remote", L"-v" }) });
 }
 static void OpRemoteRename() {
-    if (!EnsureRepo() || !NeedRemote()) return;
+    if (!EnsureRepo() || NeedRemote()) return;
     std::vector<std::wstring> rems;
     for (auto& l : SplitLines(GitOut({ L"remote" }))) { std::wstring t = Trim(l); if (!t.empty()) rems.push_back(t); }
     if (rems.empty()) return;
@@ -1369,7 +1373,7 @@ static void OpResetGit() {
 }
 // 发布固件：四重校验（代码已推/工作区干净/挂 tag/固件比源码新）后推送并发布
 static void OpReleaseFw() {
-    if (!EnsureRepo() || !NeedRemote()) return;
+    if (!EnsureRepo() || NeedRemote()) return;
     if (Trim(GitOut({ L"rev-parse", L"--is-inside-work-tree" })) != L"true") {
         Warn(g_main, L"当前目录还未初始化 Git，请先【✚ 初始化仓库】。"); return;
     }
@@ -1917,7 +1921,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id >= IDM_BASE && id < IDM_BASE + 100) {
             for (auto& cat : MENU)
                 for (auto& item : cat.items)
-                    if (item.id == id) { FlowGate(item.fn, item.name, id); return 0; }
+                    if (item.id == id) {
+                        FlowGate(item.fn, item.name, id);
+                        return 0;
+                    }
         }
         return 0;
     }
