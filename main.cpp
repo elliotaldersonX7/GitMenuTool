@@ -721,8 +721,41 @@ static bool Confirm(HWND parent, const std::wstring& msg) {
 static void Warn(HWND parent, const std::wstring& msg) { MessageBoxW(parent, msg.c_str(), L"提示", MB_OK | MB_ICONWARNING); }
 static void Info(HWND parent, const std::wstring& msg) { MessageBoxW(parent, msg.c_str(), L"提示", MB_OK | MB_ICONINFORMATION); }
 // 居中输入弹窗：OK 返回文本，取消返回 nullopt（对应 Python 版 ask）
-static std::optional<std::wstring> AskText(HWND parent, const wchar_t* title, const std::wstring& label, const std::wstring& def = L"") {
+// 自建弹窗的模态状态：按钮点击的 WM_COMMAND 走 #32770 系统过程（同步），
+// 不经过外层 GetMessage 循环——必须在子类过程里接住，否则点 OK/Cancel 弹窗永不关闭
+struct AskState {
+    HWND hEdit = nullptr;
     std::optional<std::wstring> result;
+    bool done = false;
+};
+static LRESULT CALLBACK AskDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
+    AskState* st = (AskState*)data;
+    switch (m) {
+    case WM_COMMAND: {
+        int id = LOWORD(w);
+        if (id == IDOK || id == IDCANCEL) {
+            if (id == IDOK && st->hEdit) {
+                int len = GetWindowTextLengthW(st->hEdit);
+                std::wstring s(len, L'\0');
+                GetWindowTextW(st->hEdit, &s[0], len + 1);
+                st->result = Trim(s);
+            } else {
+                st->result = std::nullopt;
+            }
+            st->done = true;
+            DestroyWindow(h);
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        st->done = true;
+        st->result = std::nullopt;
+        DestroyWindow(h);
+        return 0;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+static std::optional<std::wstring> AskText(HWND parent, const wchar_t* title, const std::wstring& label, const std::wstring& def = L"") {
     int m = (int)(14 * g_scale), bw = (int)(80 * g_scale);
     // 标签支持多行（清空Git重来的确认说明很长），行数决定标签高度
     int lines = 1;
@@ -738,43 +771,35 @@ static std::optional<std::wstring> AskText(HWND parent, const wchar_t* title, co
     RECT pr; GetWindowRect(parent, &pr);
     int x = pr.left + ((pr.right - pr.left) - w) / 2, y = pr.top + ((pr.bottom - pr.top) - h) / 2;
     if (x < 0) x = 0; if (y < 0) y = 0;
+    AskState state;
     HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", title,
         WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, w, h, parent, nullptr, g_hInst, nullptr);
+    SetWindowSubclass(dlg, AskDlgSub, 1, (DWORD_PTR)&state);
     HWND hLabel = CreateWindowExW(0, L"STATIC", label.c_str(), WS_CHILD | WS_VISIBLE,
         m, m, w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
-    HWND hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", def.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+    state.hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", def.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
         m, m + lblH + (int)(10 * g_scale), w - 2 * m, editH, dlg, (HMENU)100, g_hInst, nullptr);
     HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
         w - 2 * bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
     HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         w - bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
     SendMessageW(hLabel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
-    SendMessageW(hEdit, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(state.hEdit, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hOk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hCancel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     EnableWindow(parent, FALSE);
     ShowWindow(dlg, SW_SHOW);
-    SetFocus(hEdit);
-    MSG msg; bool run = true;
-    while (run && GetMessageW(&msg, nullptr, 0, 0)) {
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN) { run = false; continue; }
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) { result = std::nullopt; run = false; continue; }
-        if (msg.message == WM_COMMAND) {
-            int id = LOWORD(msg.wParam);
-            if (id == IDOK) {
-                int len = GetWindowTextLengthW(hEdit);
-                std::wstring s(len, L'\0');
-                GetWindowTextW(hEdit, &s[0], len + 1);
-                result = Trim(s); run = false; continue;
-            }
-            if (id == IDCANCEL) { result = std::nullopt; run = false; continue; }
-        }
-        if (!IsDialogMessageW(dlg, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    SetFocus(state.hEdit);
+    MSG msg;
+    while (!state.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        // 回车→默认按钮(IDOK)、Esc→IDCANCEL、Tab 焦点切换，全由 IsDialogMessageW 标准转换
+        if (IsDialogMessageW(dlg, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
-    DestroyWindow(dlg);
     EnableWindow(parent, TRUE);
     SetActiveWindow(parent);
-    return result;
+    return state.result;
 }
 // 目录选择对话框
 static std::optional<std::wstring> BrowseFolder(HWND parent, const wchar_t* title) {
