@@ -357,6 +357,31 @@ static Seg SegM(const std::wstring& t, COLORREF c, bool b = false) {   // 输出
 // RichEdit 底色：EM_SETBKCOLOR 新系统不可靠——三层组合拳：
 // ① GWLP_USERDATA 存底色；② WM_ERASEBKGND 自绘擦背景；③ WM_PAINT 里 RichEdit 画完文字后，
 //    用最后一个字符的行底位置把下方空白补成底色（riched20 空白区强制白底，只能这样盖）
+// 状态卡远端 URL 的手型光标与点击：不用 CFE_LINK（下划线盖字符、吸附范围大），
+// 改为字符级命中测试——光标/点击只在 URL（含 ↗）字符附近生效
+static POINT g_statDown = { -1, -1 };
+static bool StatUrlAt(HWND h, int x, int y) {
+    if (h != g_stat || g_statUrl.empty()) return false;
+    int tlen = GetWindowTextLengthW(h);
+    if (tlen < 1) return false;
+    std::wstring text(tlen, L'\0');
+    GetWindowTextW(h, &text[0], tlen + 1);
+    size_t p = text.find(g_statUrl);
+    if (p == std::wstring::npos) return false;
+    POINTL pc = { 0, 0 };
+    SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&pc, (LPARAM)(tlen - 1));
+    HDC dc = GetDC(h);
+    HFONT of = (HFONT)SelectObject(dc, g_fontUI);
+    TEXTMETRICW tm;
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, of);
+    ReleaseDC(h, dc);
+    int lh = tm.tmHeight + tm.tmExternalLeading;
+    if (y < pc.y || y > pc.y + lh) return false;   // 不在 URL 所在行
+    POINTL pl = { x, y };
+    int idx = (int)(short)LOWORD(SendMessageW(h, EM_CHARFROMPOS, 0, (LPARAM)&pl));
+    return idx >= (int)p && idx <= (int)(p + g_statUrl.size() + 1);   // URL + 空格 + ↗
+}
 static LRESULT CALLBACK RichBaseSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR) {
     if (m == WM_ERASEBKGND) {
         RECT rc; GetClientRect(h, &rc);
@@ -364,6 +389,26 @@ static LRESULT CALLBACK RichBaseSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
         FillRect((HDC)w, &rc, b);
         DeleteObject(b);
         return 1;
+    }
+    if (m == WM_SETCURSOR && h == g_stat) {
+        POINT pt; GetCursorPos(&pt);
+        ScreenToClient(h, &pt);
+        if (StatUrlAt(h, pt.x, pt.y)) {
+            SetCursor(LoadCursor(nullptr, IDC_HAND));
+            return TRUE;
+        }
+    }
+    if (m == WM_LBUTTONDOWN && h == g_stat) {
+        g_statDown.x = (short)LOWORD(l);
+        g_statDown.y = (short)HIWORD(l);
+    }
+    if (m == WM_LBUTTONUP && h == g_stat) {
+        POINT pt = { (short)LOWORD(l), (short)HIWORD(l) };
+        int dx = pt.x - g_statDown.x, dy = pt.y - g_statDown.y;
+        g_statDown.x = -1; g_statDown.y = -1;
+        // 按下/松开间距小于 5px 视为点击（拖动选文字不触发打开）
+        if (dx * dx + dy * dy < 25 && StatUrlAt(h, pt.x, pt.y) && !g_statUrl.empty())
+            ShellExecuteW(nullptr, L"open", g_statUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
     if (m == WM_PAINT) {
         DefSubclassProc(h, m, w, l);   // RichEdit 先自绘（msftedit 引擎会整块刷白，下面逐行盖回黑底）
@@ -430,7 +475,6 @@ static HWND NewRich(HWND parent, HMENU id, COLORREF bk) {
     HWND h = CreateWindowExW(WS_EX_CLIENTEDGE, RICHEDIT_CLASS, nullptr,
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_READONLY | ES_MULTILINE,
         0, 0, 0, 0, parent, id, g_hInst, nullptr);
-    SendMessageW(h, EM_SETEVENTMASK, 0, ENM_LINK);   // 链接点击需要 ENM_LINK
     SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)bk);   // 控件底色
     SetWindowSubclass(h, RichBaseSub, 1, 0);
     return h;
@@ -924,11 +968,11 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     if (!g_remote.empty()) {
         lines->push_back({ SegT(L"远端名称(本地别名)：", STAT_TXT, true), SegT(L" " + g_remote + L" ", STAT_TXT, false, BG_GRY) });
         g_statUrl = Trim(GitOut({ L"config", L"--get", L"remote." + g_remote + L".url" }));
-        // URL 不用链接样式（CFE_LINK 自带下划线会盖住 _ 等基线字符，显示成空格）；
-        // 可点击性放在 ↗ 图标上，点击直接打开 g_statUrl
+        // URL 不用 CFE_LINK 链接样式（下划线盖住 _ 字符、吸附范围异常）；
+        // 手型光标与点击由 RichBaseSub 的字符级命中测试处理
         lines->push_back({ SegT(L"远端地址：", STAT_TXT, true), SegT(L"  ", STAT_TXT),
                            SegT(g_statUrl.empty() ? L"（未取到）" : g_statUrl, STAT_BLU),
-                           SegT(L" ↗", STAT_BLU, false, 0, !g_statUrl.empty()) });
+                           SegT(L" ↗", STAT_BLU) });
     } else {
         g_statUrl.clear();
         lines->push_back({ SegT(L"远端名称(本地别名)：", STAT_TXT, true), SegT(L"（未设置）", STAT_DIM) });
@@ -1850,15 +1894,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         return 0;
     }
-    case WM_NOTIFY: {
-        NMHDR* nm = (NMHDR*)l;
-        if (nm->code == EN_LINK) {
-            ENLINK* el = (ENLINK*)l;
-            if (el->msg == WM_LBUTTONUP && !g_statUrl.empty())
-                ShellExecuteW(nullptr, L"open", g_statUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        }
+    case WM_NOTIFY:
         return 0;
-    }
     case WM_MOUSEWHEEL: {
         // 光标在左栏 → 左栏滚动；否则输出区滚动
         POINT pt; GetCursorPos(&pt);
