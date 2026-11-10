@@ -1592,17 +1592,25 @@ static void PickDir() {
 }
 
 // ============================ 流程卡锁定 ====================================
-// 流程①②③任一未完成时锁定修改类/推送类按钮；只读查看类不锁（无害且便于诊断）
-static bool IsReadOnlyOp(int id) {
+// 流程①②③任一未完成时锁定破坏类按钮；以下三类豁免：
+// ① 只读查看类（无害且便于诊断）② 导航/恢复类（防流程锁死：新建分支后必须能切回/能 stash）
+// ③ 完成首推所需（新分支上提交+推送后 ③ 变绿，其余按钮自动解锁）
+static bool FlowAllowed(int id) {
     switch (id) {
+    // 只读查看类
     case IDM_STATUS: case IDM_DIFF: case IDM_LOG_ALL: case IDM_SHOW:
     case IDM_REMOTE_INFO: case IDM_TAG_LIST: case IDM_REMOTE_LS:
+    // 导航与恢复类（防死锁）
+    case IDM_BRANCH_SW: case IDM_BACK_MAIN: case IDM_CHECKOUT_REF:
+    case IDM_STASH: case IDM_STASH_POP:
+    // 完成首推所需
+    case IDM_COMMIT: case IDM_PUSH: case IDM_PULL:
         return true;
     }
     return false;
 }
 static void FlowGate(void (*fn)(), const wchar_t* name, int id) {
-    if (g_flowBlock != -1 && !IsReadOnlyOp(id)) {   // 流程①②③任一未完成：锁定（只读除外）
+    if (g_flowBlock != -1 && !FlowAllowed(id)) {   // 流程①②③任一未完成：锁定（只读除外）
         if (g_lastSkip != name) {
             g_lastSkip = name;
             OutTxt(L"流程未完成：先解决流程卡红色环节（点红卡可直接修复），【" + std::wstring(name) + L"】等后续操作暂被锁定。");
