@@ -346,9 +346,9 @@ static Seg SegT(const std::wstring& t, COLORREF c, bool b = false, COLORREF back
 static Seg SegM(const std::wstring& t, COLORREF c, bool b = false) {   // 输出区等宽字体
     Seg s; s.text = t; s.color = c; s.bold = b; s.back = 0; s.link = false; s.face = L"Consolas"; s.pt = 10; return s;
 }
-static void LoadMsftEdit() { LoadLibraryW(L"Msftedit.dll"); }
+static void LoadMsftEdit() { LoadLibraryW(L"Riched20.dll"); }   // RichEdit20W：支持 EM_SETBKCOLOR 黑底（Msftedit 新系统会忽略）
 static HWND NewRich(HWND parent, HMENU id, COLORREF bk) {
-    HWND h = CreateWindowExW(WS_EX_CLIENTEDGE, MSFTEDIT_CLASS, nullptr,
+    HWND h = CreateWindowExW(WS_EX_CLIENTEDGE, RICHEDIT_CLASS, nullptr,
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_READONLY | ES_MULTILINE,
         0, 0, 0, 0, parent, id, g_hInst, nullptr);
     SendMessageW(h, EM_SETEVENTMASK, 0, ENM_LINK);   // 链接点击需要 ENM_LINK
