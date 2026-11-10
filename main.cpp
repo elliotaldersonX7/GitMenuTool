@@ -368,8 +368,11 @@ static bool StatUrlAt(HWND h, int x, int y) {
     GetWindowTextW(h, &text[0], tlen + 1);
     size_t p = text.find(g_statUrl);
     if (p == std::wstring::npos) return false;
-    POINTL pc = { 0, 0 };
-    SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&pc, (LPARAM)(tlen - 1));
+    size_t uLen = g_statUrl.size();
+    // 几何判定：锚定 URL 首末字符的位置（不用行尾符号——\r 的 pos 会落到下一行）
+    POINTL p0 = { 0, 0 }, p1 = { 0, 0 };
+    SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&p0, (LPARAM)(int)p);
+    SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&p1, (LPARAM)(int)(p + uLen - 1));
     HDC dc = GetDC(h);
     HFONT of = (HFONT)SelectObject(dc, g_fontUI);
     TEXTMETRICW tm;
@@ -377,10 +380,10 @@ static bool StatUrlAt(HWND h, int x, int y) {
     SelectObject(dc, of);
     ReleaseDC(h, dc);
     int lh = tm.tmHeight + tm.tmExternalLeading;
-    if (y < pc.y || y > pc.y + lh) return false;   // 不在 URL 所在行
-    POINTL pl = { x, y };
-    int idx = (int)(short)LOWORD(SendMessageW(h, EM_CHARFROMPOS, 0, (LPARAM)&pl));
-    return idx >= (int)p && idx <= (int)(p + g_statUrl.size() + 1);   // URL + 空格 + ↗
+    if (y < p0.y || y > p0.y + lh) return false;              // 严格限定 URL 所在行
+    int cw = uLen > 1 ? (p1.x - p0.x) / (int)(uLen - 1) : lh / 2;   // 字符均宽
+    if (x < p0.x || x > p1.x + cw) return false;              // 严格限定 URL 字符区（含末字符一格与 ↗）
+    return true;
 }
 static LRESULT CALLBACK RichBaseSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR) {
     if (m == WM_ERASEBKGND) {
