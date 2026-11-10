@@ -1588,8 +1588,17 @@ static void PickDir() {
 }
 
 // ============================ 流程卡锁定 ====================================
-static void FlowGate(void (*fn)(), const wchar_t* name) {
-    if (g_flowBlock != -1) {   // 流程①②③任一未完成：锁定
+// 流程①②③任一未完成时锁定修改类/推送类按钮；只读查看类不锁（无害且便于诊断）
+static bool IsReadOnlyOp(int id) {
+    switch (id) {
+    case IDM_STATUS: case IDM_DIFF: case IDM_LOG_ALL: case IDM_SHOW:
+    case IDM_REMOTE_INFO: case IDM_TAG_LIST: case IDM_REMOTE_LS:
+        return true;
+    }
+    return false;
+}
+static void FlowGate(void (*fn)(), const wchar_t* name, int id) {
+    if (g_flowBlock != -1 && !IsReadOnlyOp(id)) {   // 流程①②③任一未完成：锁定（只读除外）
         if (g_lastSkip != name) {
             g_lastSkip = name;
             OutTxt(L"流程未完成：先解决流程卡红色环节（点红卡可直接修复），【" + std::wstring(name) + L"】等后续操作暂被锁定。");
@@ -1908,7 +1917,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id >= IDM_BASE && id < IDM_BASE + 100) {
             for (auto& cat : MENU)
                 for (auto& item : cat.items)
-                    if (item.id == id) { FlowGate(item.fn, item.name); return 0; }
+                    if (item.id == id) { FlowGate(item.fn, item.name, id); return 0; }
         }
         return 0;
     }
@@ -1943,7 +1952,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         g_statusRunning = false;
         RenderStatus((std::vector<std::vector<Seg>>*)w);
         return 0;
+    case WM_TIMER:
+        // 定时自动刷新状态卡：感知工具外部的改动（他处提交/推送/切分支），空闲时才刷新
+        if (w == 1 && !g_busy && !g_statusRunning) RefreshStatusAsync();
+        return 0;
     case WM_DESTROY:
+        KillTimer(g_main, 1);
         PostQuitMessage(0);
         return 0;
     }
@@ -2019,6 +2033,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_topStatics[0] = MkStatic(g_main, L"操作目录:", 0, 0, 0, 0, 0, g_fontUI);
     g_topStatics[1] = MkStatic(g_main, L">_", 0, 0, 0, 0, 0, g_fontMono);
     BuildControls();
+    SetTimer(g_main, 1, 4000, nullptr);   // 每 4 秒自动刷新状态卡
     ShowWindow(g_main, nCmdShow);
     UpdateWindow(g_main);
     // 记住上次目录
