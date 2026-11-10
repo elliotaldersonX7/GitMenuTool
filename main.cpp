@@ -326,6 +326,7 @@ static const COLORREF CLR_CMD  = RGB(0x8f, 0xd1, 0x8f);
 static const COLORREF CLR_ERR  = RGB(0xff, 0x80, 0x80);
 static const COLORREF CLR_SEP  = RGB(0x66, 0x66, 0x66);
 static const COLORREF CLR_TXT  = RGB(0xdd, 0xdd, 0xdd);
+static const COLORREF CLR_HINT = RGB(0x9a, 0xa0, 0xa6);
 static const COLORREF STAT_TXT = RGB(0x22, 0x22, 0x22);
 static const COLORREF STAT_DIM = RGB(0x9a, 0xa0, 0xa6);
 static const COLORREF STAT_RED = RGB(0xd3, 0x2f, 0x2f);
@@ -373,20 +374,30 @@ static LRESULT CALLBACK RichBaseSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
             ReleaseDC(h, tdc);
         }
         HBRUSH b = CreateSolidBrush(base);
-        // 逐行补齐行尾右侧的空白（含换行空行），msftedit 只给字符格子涂底色
+        int total = GetWindowTextLengthW(h);
+        // 逐行补齐行尾"段落标记格"：行尾格的 x 由后一个字符位置判定
+        // （EM_LINELENGTH 是否含行尾 \r 不确定，用 pa/pb 是否同行来消歧）
         int lineCount = (int)SendMessageW(h, EM_GETLINECOUNT, 0, 0);
         for (int i = 0; i < lineCount; ++i) {
             int start = (int)SendMessageW(h, EM_LINEINDEX, i, 0);
             if (start < 0) break;
             int len = (int)SendMessageW(h, EM_LINELENGTH, start, 0);
-            POINTL pl = { 0, 0 };
-            if (len > 0) SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&pl, (LPARAM)(start + len - 1));
-            else SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&pl, (LPARAM)start);
-            if (pl.y > rc.bottom) break;         // 已滚出可视区下方，后续行更靠下
-            if (pl.y + lh < 0) continue;         // 滚出上方
-            int x0 = (len > 0 ? pl.x + cw : 0);
+            if (len < 1) continue;
+            POINTL pa = { 0, 0 };
+            SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&pa, (LPARAM)(start + len - 1));
+            if (pa.y > rc.bottom) break;         // 已滚出可视区下方，后续行更靠下
+            if (pa.y + lh < 0) continue;         // 滚出上方
+            int x0;
+            if (start + len < total) {
+                POINTL pb = { 0, 0 };
+                SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&pb, (LPARAM)(start + len));
+                x0 = (pb.y == pa.y) ? pb.x : pa.x;   // 同行→pb 是行尾格；否则 pa 本身是行尾格
+            } else {
+                x0 = pa.x + cw;
+            }
+            if (x0 < 0) x0 = 0;
             if (x0 < rc.right) {
-                RECT fr = { x0, pl.y, rc.right, pl.y + lh };
+                RECT fr = { x0, pa.y, rc.right, pa.y + lh };
                 FillRect(dc, &fr, b);
             }
         }
@@ -438,13 +449,166 @@ static void RichAppend(HWND h, const std::vector<Seg>& segs) {
     SendMessageW(h, EM_SCROLLCARET, 0, 0);
 }
 static void RichAppendLine(HWND h, const std::vector<Seg>& segs) {
-    std::vector<Seg> v = segs; v.push_back(SegM(L"\r\n", CLR_TXT));
+    // 关键：行尾"段落标记格"的底色由 \r 的字符格式决定，且只对 \r\n 选区设格式会被忽略，
+    // 必须追加完成后显式选中行尾 \r 再设一次底色，否则每行末尾有白色竖条。
+    std::vector<Seg> v = segs;
+    if (!v.empty()) {
+        v.back().text += L"\r\n";
+    } else {
+        v.push_back(SegM(L" \r\n", CLR_TXT));
+    }
     RichAppend(h, v);
+    CHARRANGE cr;
+    SendMessageW(h, EM_EXGETSEL, 0, (LPARAM)&cr);
+    if (cr.cpMax >= 1) {
+        CHARRANGE crMark = { cr.cpMax - 1, cr.cpMax };   // 行尾 \r
+        SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&crMark);
+        CHARFORMAT2W cf = { sizeof(cf) };
+        cf.dwMask = CFM_COLOR | CFM_BACKCOLOR | CFM_FACE | CFM_SIZE;
+        cf.crBackColor = (COLORREF)GetWindowLongPtrW(h, GWLP_USERDATA);
+        cf.crTextColor = CLR_TXT;
+        lstrcpynW(cf.szFaceName, L"Consolas", LF_FACESIZE);
+        cf.yHeight = 10 * 20;
+        SendMessageW(h, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+        CHARRANGE crEnd = { cr.cpMax, cr.cpMax };
+        SendMessageW(h, EM_EXSETSEL, 0, (LPARAM)&crEnd);
+    }
 }
-static void OutSep()  { RichAppend(g_out, { SegM(std::wstring(72, L'='), CLR_SEP), SegM(L"\r\n", CLR_TXT) }); }
-static void OutCmd(const std::wstring& s)  { RichAppendLine(g_out, { SegM(L"> " + s, CLR_CMD) }); }
-static void OutTxt(const std::wstring& s)  { RichAppendLine(g_out, { SegM(s, CLR_TXT) }); }
-static void OutErr(const std::wstring& s)  { RichAppendLine(g_out, { SegM(s, CLR_ERR) }); }
+// ============================ 输出区（单窗口自绘黑底日志） ===================
+// richedit 的空白区底色在新系统不可控（引擎强制刷白，EM_SETBKCOLOR/字符底色/行尾补色
+// 都只能管到局部），输出区改为与左栏同款的自绘方案：日志行存自有结构，
+// WM_PAINT 双缓冲画黑底+彩色文字，滚动与复制自管
+struct LogSeg { std::wstring text; COLORREF color; };
+struct LogLine { std::vector<LogSeg> segs; };
+static std::vector<LogLine> g_log;
+static int g_logScroll = 0, g_logTotalH = 0;
+static int LogLineH() {
+    HDC dc = GetDC(nullptr);
+    HFONT of = (HFONT)SelectObject(dc, g_fontMono);
+    TEXTMETRICW tm;
+    GetTextMetricsW(dc, &tm);
+    SelectObject(dc, of);
+    ReleaseDC(nullptr, dc);
+    return tm.tmHeight + tm.tmExternalLeading;
+}
+static void UpdateOutScroll(HWND h) {
+    g_logTotalH = (int)g_log.size() * LogLineH() + (int)(8 * g_scale);
+    RECT rc; GetClientRect(h, &rc);
+    SCROLLINFO si = { sizeof(si), SIF_RANGE | SIF_PAGE, 0, g_logTotalH, (UINT)rc.bottom, 0 };
+    SetScrollInfo(h, SB_VERT, &si, TRUE);
+}
+static void OutScrollTo(HWND h, int pos) {
+    RECT rc; GetClientRect(h, &rc);
+    int maxScroll = g_logTotalH - (rc.bottom - rc.top);
+    if (maxScroll < 0) maxScroll = 0;
+    if (pos < 0) pos = 0;
+    if (pos > maxScroll) pos = maxScroll;
+    if (pos != g_logScroll) {
+        g_logScroll = pos;
+        SetScrollPos(h, SB_VERT, pos, TRUE);
+        InvalidateRect(h, nullptr, FALSE);
+    }
+}
+static void LogAppend(const std::vector<Seg>& segs) {
+    LogLine ln;
+    for (auto& s : segs) ln.segs.push_back({ s.text, s.color });
+    g_log.push_back(std::move(ln));
+    if (g_out) {
+        UpdateOutScroll(g_out);
+        InvalidateRect(g_out, nullptr, FALSE);
+    }
+}
+static void CopyAllLog() {
+    // 整段日志复制到剪贴板（输出区聚焦时 Ctrl+C）
+    std::wstring all;
+    for (auto& ln : g_log)
+        for (auto& s : ln.segs) all += s.text;
+    if (all.empty()) return;
+    if (!OpenClipboard(g_main)) return;
+    EmptyClipboard();
+    int bytes = (int)((all.size() + 1) * sizeof(wchar_t));
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (hMem) {
+        void* p = GlobalLock(hMem);
+        if (p) { memcpy(p, all.c_str(), bytes); GlobalUnlock(hMem); }
+        SetClipboardData(CF_UNICODETEXT, hMem);
+    }
+    CloseClipboard();
+    LogAppend({ SegM(L"[已复制全部日志到剪贴板]", CLR_HINT) });
+}
+static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc; GetClientRect(h, &rc);
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        HBITMAP oldb = (HBITMAP)SelectObject(mem, bmp);
+        HBRUSH bg = CreateSolidBrush(RGB(0x11, 0x11, 0x11));
+        FillRect(mem, &rc, bg);
+        DeleteObject(bg);
+        SetBkMode(mem, TRANSPARENT);
+        SelectObject(mem, g_fontMono);
+        int lh = LogLineH();
+        int pad = (int)(6 * g_scale);
+        int first = g_logScroll / lh;
+        int y = first * lh - g_logScroll;
+        for (int i = first; i < (int)g_log.size() && y < rc.bottom; ++i, y += lh) {
+            int x = pad;
+            for (auto& s : g_log[i].segs) {
+                if (s.text.empty()) continue;
+                SetTextColor(mem, s.color);
+                SIZE sz;
+                GetTextExtentPoint32W(mem, s.text.c_str(), (int)s.text.size(), &sz);
+                TextOutW(mem, x, y, s.text.c_str(), (int)s.text.size());
+                x += sz.cx;
+            }
+        }
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);   // 双缓冲回贴到窗口
+        SelectObject(mem, oldb);
+        DeleteObject(bmp);
+        DeleteDC(mem);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_VSCROLL: {
+        int lh = LogLineH();
+        int pos = g_logScroll;
+        switch (LOWORD(w)) {
+            case SB_TOP: pos = 0; break;
+            case SB_BOTTOM: pos = g_logTotalH; break;
+            case SB_LINEUP: pos -= lh; break;
+            case SB_LINEDOWN: pos += lh; break;
+            case SB_PAGEUP: pos -= (int)(120 * g_scale); break;
+            case SB_PAGEDOWN: pos += (int)(120 * g_scale); break;
+            case SB_THUMBTRACK: pos = HIWORD(w); break;
+        }
+        OutScrollTo(h, pos);
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        int pos = g_logScroll - (int)GET_WHEEL_DELTA_WPARAM(w) * LogLineH() * 3 / WHEEL_DELTA;
+        OutScrollTo(h, pos);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+        SetFocus(h);
+        return 0;
+    case WM_KEYDOWN:
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && w == 'C') CopyAllLog();
+        return 0;
+    case WM_SETFOCUS:
+        return 0;   // 只读日志，不显示输入光标
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+static void OutSep()  { LogAppend({ SegM(std::wstring(72, L'='), CLR_SEP) }); }
+static void OutCmd(const std::wstring& s)  { LogAppend({ SegM(L"> " + s, CLR_CMD) }); }
+static void OutTxt(const std::wstring& s)  { LogAppend({ SegM(s, CLR_TXT) }); }
+static void OutErr(const std::wstring& s)  { LogAppend({ SegM(s, CLR_ERR) }); }
 
 // ============================ 异步执行引擎 ==================================
 struct JobCmd { std::vector<std::wstring> argv; bool optional; };   // optional=失败不中止
@@ -1485,9 +1649,10 @@ static void BuildControls() {
     MkBtn(g_main, L"⤓ 一键配置ignore", IDC_IGNORE, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L">_ 打开 .gitignore", IDC_OPENIGN, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"清空Git重来", IDC_RESET, 0, 0, 0, 0, g_fontUI);
-    // 状态卡 + 输出区
+    // 状态卡（RichEdit）+ 输出区（自绘黑底日志）
     g_stat = NewRich(g_main, (HMENU)IDC_STAT, RGB(0xff, 0xff, 0xff));
-    g_out  = NewRich(g_main, (HMENU)IDC_OUT, RGB(0x11, 0x11, 0x11));
+    g_out  = CreateWindowExW(0, L"GIT_OUT", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+                             0, 0, 0, 0, g_main, (HMENU)IDC_OUT, g_hInst, nullptr);
     // 命令输入行
     g_cmdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                 0, 0, 0, 0, g_main, (HMENU)IDC_CMDEDIT, g_hInst, nullptr);
@@ -1586,6 +1751,13 @@ static void Layout() {
     // 输出区
     y += cmdH + (int)(6 * g_scale);
     MoveWindow(g_out, rightX, y, rightW, H - y - m, TRUE);
+    UpdateOutScroll(g_out);
+    {   // 窗口变高后钳制滚动位置
+        RECT orc; GetClientRect(g_out, &orc);
+        int maxScroll = g_logTotalH - (orc.bottom - orc.top);
+        if (maxScroll < 0) maxScroll = 0;
+        if (g_logScroll > maxScroll) { g_logScroll = maxScroll; InvalidateRect(g_out, nullptr, FALSE); }
+    }
 }
 // 状态卡渲染
 static void RenderStatus(std::vector<std::vector<Seg>>* lines) {
@@ -1606,7 +1778,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int id = LOWORD(w), code = HIWORD(w);
         (void)code;
         if (id == IDC_PICKDIR) { PickDir(); return 0; }
-        if (id == IDC_CLEAROUT) { SetWindowTextW(g_out, L""); return 0; }
+        if (id == IDC_CLEAROUT) { g_log.clear(); g_logScroll = 0; UpdateOutScroll(g_out); InvalidateRect(g_out, nullptr, FALSE); return 0; }
         if (id == IDC_CMDRUN) { RunCmdLine(); return 0; }
         if (id == IDC_REFRESH) { RefreshStatusAsync(); return 0; }
         if (id == IDC_GLOBALCFG) { OpGlobalCfg(); return 0; }
@@ -1714,6 +1886,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.lpszClassName = L"GIT_LEFT";
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     RegisterClassW(&wc);
+    // 注册输出区自绘类
+    WNDCLASSW wco = {};
+    wco.lpfnWndProc = OutProc;
+    wco.hInstance = hInst;
+    wco.lpszClassName = L"GIT_OUT";
+    wco.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wco.hbrBackground = nullptr;
+    RegisterClassW(&wco);
     // 主窗口
     WNDCLASSW wcm = {};
     wcm.lpfnWndProc = WndProc;
