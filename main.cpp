@@ -130,7 +130,7 @@ static double g_scale = 1.0;
 static std::wstring g_git, g_gh, g_repo, g_remote, g_statUrl;
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
-static bool g_pushAfterRemoteChange = false;   // 更换远端后提示首推
+static bool g_pushAfterRemoteChange = false;   // 更换远端后自动强制首推
 static int g_flowBlock = -1;              // 流程卡卡点（0/1 锁定左侧按钮）
 static std::wstring g_lastSkip;           // 同一卡点只提示一次
 static int g_leftScroll = 0, g_leftTotalH = 0;
@@ -1066,7 +1066,7 @@ static void OpRemoteUrl() {
     }
     auto url = AskText(g_main, L"更换远端地址", L"新的仓库地址:");
     if (!url || url->empty()) return;
-    g_pushAfterRemoteChange = true;   // 改完地址后弹窗询问是否立即首推
+    g_pushAfterRemoteChange = true;   // 改完地址后自动强制首推（用户要求，不再询问）
     ExecV({ G({ L"remote", L"set-url", rn, *url }), G({ L"remote", L"-v" }) });
 }
 static void OpRemoteRename() {
@@ -1884,8 +1884,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         RefreshStatusAsync();
         if (g_pushAfterRemoteChange) {
             g_pushAfterRemoteChange = false;
-            if (Confirm(g_main, L"远端地址已更换。是否立即推送当前分支和标签到新远端？\n（新仓库为空时，这一步就是首推；取消可稍后手动点【推送(commit)】）"))
-                DoPushCore(true);
+            OutTxt(L"已更换远端地址，自动推送当前分支和标签到新远端……");
+            DoPushCore(true);
         }
         return 0;
     case WM_APP_STATUS:
