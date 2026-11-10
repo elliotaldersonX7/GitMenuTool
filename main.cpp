@@ -1269,66 +1269,141 @@ static HWND MkStatic(HWND parent, const wchar_t* text, int id, int x, int y, int
     SetWindowLongPtrW(c, GWLP_USERDATA, (LONG_PTR)y);
     return c;
 }
-// 左侧面板子控件按"基准 y - 滚动量"重定位。
-// 关键：滚动量不是节距整数倍时，MoveWindow 的新旧矩形相交区被视为有效而跳过重绘，
-// 留下错位的旧内容碎片。故搬完再把每个子控件整体失效，强制全部重绘。
-static void RepositionLeftChildren(HWND h) {
-    EnumChildWindows(h, [](HWND c, LPARAM)->BOOL {
-        int baseY = (int)GetWindowLongPtrW(c, GWLP_USERDATA);
-        RECT r; GetWindowRect(c, &r); MapWindowPoints(nullptr, g_leftPanel, (LPPOINT)&r, 2);
-        MoveWindow(c, r.left, baseY - g_leftScroll, r.right - r.left, r.bottom - r.top, FALSE);
-        InvalidateRect(c, nullptr, TRUE);
-        return TRUE;
-    }, 0);
-    InvalidateRect(h, nullptr, FALSE);   // 面板暴露的缝隙与边条
-}
+// 左侧面板：单窗口自绘（无子窗口按钮），滚动/悬停全走重绘，从机制上根除残影与闪烁
+struct LeftItem { bool cat; std::wstring name; int id; int y; int h; };
+static std::vector<LeftItem> g_leftItems;
+static int g_leftHover = -1, g_leftPressed = -1;
+static bool g_leftTracking = false;
+
 // 滚动条几何：nMax=内容总高、nPage=可视高，滑块到底才会真正到底
 static void UpdateLeftScroll(HWND h) {
     RECT rc; GetClientRect(h, &rc);
     SCROLLINFO si = { sizeof(si), SIF_RANGE | SIF_PAGE, 0, g_leftTotalH, (UINT)rc.bottom, 0 };
     SetScrollInfo(h, SB_VERT, &si, TRUE);
 }
-// 左侧面板：自绘滚动（子控件按基准 y - 滚动量重定位），按钮命令转发主窗口
+static int LeftHitTest(HWND h, int my) {
+    int yy = my + g_leftScroll;   // 客户区 y → 内容 y
+    for (int i = 0; i < (int)g_leftItems.size(); ++i)
+        if (!g_leftItems[i].cat && yy >= g_leftItems[i].y && yy < g_leftItems[i].y + g_leftItems[i].h)
+            return i;
+    return -1;
+}
+static void LeftScrollTo(HWND h, int pos) {
+    RECT rc; GetClientRect(h, &rc);
+    int maxScroll = g_leftTotalH - (rc.bottom - rc.top);
+    if (maxScroll < 0) maxScroll = 0;
+    if (pos < 0) pos = 0;
+    if (pos > maxScroll) pos = maxScroll;
+    if (pos != g_leftScroll) {
+        g_leftScroll = pos;
+        SetScrollPos(h, SB_VERT, pos, TRUE);
+        InvalidateRect(h, nullptr, FALSE);
+    }
+}
 static LRESULT CALLBACK LeftPanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    if (m == WM_VSCROLL) {
+    switch (m) {
+    case WM_ERASEBKGND:
+        return 1;   // WM_PAINT 双缓冲全绘，不再单独擦背景（免闪烁）
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
         RECT rc; GetClientRect(h, &rc);
-        int maxScroll = g_leftTotalH - (rc.bottom - rc.top);
-        if (maxScroll < 0) maxScroll = 0;
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        HBITMAP oldb = (HBITMAP)SelectObject(mem, bmp);
+        HBRUSH bg = CreateSolidBrush(RGB(0xf0, 0xf0, 0xf0));
+        FillRect(mem, &rc, bg);
+        DeleteObject(bg);
+        SetBkMode(mem, TRANSPARENT);
+        int bw = (int)(182 * g_scale);
+        if (bw > rc.right - 8) bw = rc.right - 8;
+        for (int i = 0; i < (int)g_leftItems.size(); ++i) {
+            LeftItem& it = g_leftItems[i];
+            int y = it.y - g_leftScroll;
+            if (y + it.h < 0 || y > rc.bottom) continue;
+            if (it.cat) {
+                SelectObject(mem, g_fontMenuBold);
+                SetTextColor(mem, RGB(0x33, 0x33, 0x33));
+                std::wstring t = L"— " + it.name + L" —";
+                RECT tr = { 0, y, rc.right, y + it.h };
+                DrawTextW(mem, t.c_str(), -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            } else {
+                bool hov = (i == g_leftHover), prs = (i == g_leftPressed);
+                RECT br = { 4, y, 4 + bw, y + it.h };
+                HBRUSH fill = CreateSolidBrush(prs ? RGB(0xdc, 0xe9, 0xfd)
+                                                   : hov ? RGB(0xe8, 0xf0, 0xfe) : RGB(0xff, 0xff, 0xff));
+                FillRect(mem, &br, fill);
+                DeleteObject(fill);
+                HBRUSH frame = CreateSolidBrush((hov || prs) ? RGB(0x1a, 0x73, 0xe8) : RGB(0xad, 0xad, 0xad));
+                FrameRect(mem, &br, frame);
+                DeleteObject(frame);
+                SelectObject(mem, g_fontMenu);
+                SetTextColor(mem, RGB(0x1a, 0x1a, 0x1a));
+                DrawTextW(mem, it.name.c_str(), -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);   // 双缓冲回贴到窗口
+        SelectObject(mem, oldb);
+        DeleteObject(bmp);
+        DeleteDC(mem);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        int hit = LeftHitTest(h, (short)HIWORD(l));
+        if (hit != g_leftHover) {
+            g_leftHover = hit;
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        if (!g_leftTracking) {
+            TRACKMOUSEEVENT te = { sizeof(te), TME_LEAVE, h, 0 };
+            TrackMouseEvent(&te);
+            g_leftTracking = true;
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        g_leftTracking = false;
+        if (g_leftHover != -1) { g_leftHover = -1; InvalidateRect(h, nullptr, FALSE); }
+        return 0;
+    case WM_LBUTTONDOWN:
+        g_leftPressed = LeftHitTest(h, (short)HIWORD(l));
+        if (g_leftPressed != -1) {
+            SetCapture(h);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    case WM_LBUTTONUP: {
+        ReleaseCapture();
+        int hit = LeftHitTest(h, (short)HIWORD(l));
+        int pr = g_leftPressed;
+        g_leftPressed = -1;
+        InvalidateRect(h, nullptr, FALSE);
+        if (hit != -1 && hit == pr)
+            SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(g_leftItems[hit].id, 0), 0);
+        return 0;
+    }
+    case WM_VSCROLL: {
         int line = (int)(22 * g_scale);
         int pos = g_leftScroll;
         switch (LOWORD(w)) {
             case SB_TOP: pos = 0; break;
-            case SB_BOTTOM: pos = maxScroll; break;
+            case SB_BOTTOM: pos = g_leftTotalH; break;
             case SB_LINEUP: pos -= line; break;
             case SB_LINEDOWN: pos += line; break;
             case SB_PAGEUP: pos -= (int)(120 * g_scale); break;
             case SB_PAGEDOWN: pos += (int)(120 * g_scale); break;
             case SB_THUMBTRACK: pos = HIWORD(w); break;
         }
-        if (pos < 0) pos = 0;
-        if (pos > maxScroll) pos = maxScroll;
-        if (pos != g_leftScroll) {
-            g_leftScroll = pos;
-            SetScrollPos(h, SB_VERT, pos, TRUE);
-            RepositionLeftChildren(h);
-        }
+        LeftScrollTo(h, pos);
         return 0;
     }
-    if (m == WM_MOUSEWHEEL) {
-        RECT rc; GetClientRect(h, &rc);
-        int maxScroll = g_leftTotalH - (rc.bottom - rc.top);
-        if (maxScroll < 0) maxScroll = 0;
+    case WM_MOUSEWHEEL: {
         int pos = g_leftScroll - (int)GET_WHEEL_DELTA_WPARAM(w) * (int)(22 * g_scale) / WHEEL_DELTA;
-        if (pos < 0) pos = 0;
-        if (pos > maxScroll) pos = maxScroll;
-        if (pos != g_leftScroll) {
-            g_leftScroll = pos;
-            SetScrollPos(h, SB_VERT, pos, TRUE);
-            RepositionLeftChildren(h);
-        }
+        LeftScrollTo(h, pos);
         return 0;
     }
-    if (m == WM_COMMAND) { SendMessageW(g_main, m, w, l); return 0; }
+    }
     return DefWindowProcW(h, m, w, l);
 }
 static HWND g_topStatics[2];
@@ -1357,19 +1432,17 @@ static void BuildControls() {
     SendMessageW(g_cmdEdit, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
     g_cmdEditProc = (WNDPROC)SetWindowLongPtrW(g_cmdEdit, GWLP_WNDPROC, (LONG_PTR)CmdEditSubProc);
     MkBtn(g_main, L"运行", IDC_CMDRUN, 0, 0, 0, 0, g_fontUI);
-    // 左侧面板
-    g_leftPanel = CreateWindowExW(0, L"GIT_LEFT", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
+    // 左侧面板（单窗口自绘，菜单项为数据而非子窗口）
+    g_leftPanel = CreateWindowExW(0, L"GIT_LEFT", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL,
                                   0, 0, 0, 0, g_main, (HMENU)IDC_LEFT, g_hInst, nullptr);
+    g_leftItems.clear();
     int y = (int)(4 * g_scale);
-    int pw = (int)(182 * g_scale);
     int catH = (int)(22 * g_scale), btnH = (int)(22 * g_scale), gap = (int)(1 * g_scale);
     for (auto& cat : MENU) {
-        HWND c = MkStatic(g_leftPanel, (std::wstring(L"— ") + cat.title + L" —").c_str(), 0, 4, y, pw, catH, g_fontMenuBold);
-        SetWindowLongPtrW(c, GWLP_USERDATA, (LONG_PTR)y);
+        g_leftItems.push_back({ true, cat.title, 0, y, catH });
         y += catH + gap;
         for (auto& item : cat.items) {
-            HWND b = MkBtn(g_leftPanel, item.name, item.id, 4, y, pw, btnH, g_fontMenu);
-            SetWindowLongPtrW(b, GWLP_USERDATA, (LONG_PTR)y);
+            g_leftItems.push_back({ false, item.name, item.id, y, btnH });
             y += btnH + gap;
         }
     }
@@ -1413,7 +1486,7 @@ static void Layout() {
         RECT lrc; GetClientRect(g_leftPanel, &lrc);
         int maxScroll = g_leftTotalH - (lrc.bottom - lrc.top);
         if (maxScroll < 0) maxScroll = 0;
-        if (g_leftScroll > maxScroll) { g_leftScroll = maxScroll; RepositionLeftChildren(g_leftPanel); }
+        if (g_leftScroll > maxScroll) { g_leftScroll = maxScroll; InvalidateRect(g_leftPanel, nullptr, FALSE); }
     }
     int rightX = leftW + m, rightW = W - rightX - m;
     // 状态按钮行：宽度按文字实测分配，避免小字被截断
