@@ -130,6 +130,7 @@ static double g_scale = 1.0;
 static std::wstring g_git, g_gh, g_repo, g_remote, g_statUrl;
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
+static bool g_pushAfterRemoteChange = false;   // 更换远端后提示首推
 static int g_flowBlock = -1;              // 流程卡卡点（0/1 锁定左侧按钮）
 static std::wstring g_lastSkip;           // 同一卡点只提示一次
 static int g_leftScroll = 0, g_leftTotalH = 0;
@@ -991,11 +992,10 @@ static void OpShow() {
     if (sha->empty()) Exec({ G({ L"--no-pager", L"show" }) });
     else Exec({ G({ L"--no-pager", L"show", *sha }) });
 }
-static void OpPush() {
+// 推送核心序列（OpPush 与"更换远端后首推"共用）：无上游→fetch 后检查无关历史并询问强推
+static void DoPushCore(bool withTags) {
     if (!EnsureRepo() || !NeedRemote()) return;
     std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
-    if (!up.empty()) { Exec({ G({ L"push" }) }); return; }
-    // 无上游跟踪（首次推送）：检查远端同名分支历史是否与本地无关
     std::wstring br = CurBranch();
     GitOut({ L"fetch", L"--quiet", g_remote }, 120000);
     std::wstring head = Trim(GitOut({ L"rev-parse", L"HEAD" }));
@@ -1011,10 +1011,19 @@ static void OpPush() {
         } else {
             cmds.push_back(G({ L"push", L"-u", g_remote, br }));
         }
-    } else {
+    } else if (up.empty()) {
         cmds.push_back(G({ L"push", L"-u", g_remote, br }));
+    } else {
+        cmds.push_back(G({ L"push" }));
     }
+    if (withTags) cmds.push_back(G({ L"push", g_remote, L"--tags" }));
     ExecV(cmds);
+}
+static void OpPush() {
+    if (!EnsureRepo() || !NeedRemote()) return;
+    std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
+    if (!up.empty()) { Exec({ G({ L"push" }) }); return; }
+    DoPushCore(false);
 }
 static void OpInitRepo() {
     if (!EnsureRepo()) return;
@@ -1057,7 +1066,8 @@ static void OpRemoteUrl() {
     }
     auto url = AskText(g_main, L"更换远端地址", L"新的仓库地址:");
     if (!url || url->empty()) return;
-    Exec({ G({ L"remote", L"set-url", rn, *url }), G({ L"remote", L"-v" }) });
+    g_pushAfterRemoteChange = true;   // 改完地址后弹窗询问是否立即首推
+    ExecV({ G({ L"remote", L"set-url", rn, *url }), G({ L"remote", L"-v" }) });
 }
 static void OpRemoteRename() {
     if (!EnsureRepo() || !NeedRemote()) return;
@@ -1872,6 +1882,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_APP_JOBDONE:
         g_busy = false;
         RefreshStatusAsync();
+        if (g_pushAfterRemoteChange) {
+            g_pushAfterRemoteChange = false;
+            if (Confirm(g_main, L"远端地址已更换。是否立即推送当前分支和标签到新远端？\n（新仓库为空时，这一步就是首推；取消可稍后手动点【推送(commit)】）"))
+                DoPushCore(true);
+        }
         return 0;
     case WM_APP_STATUS:
         g_statusRunning = false;
