@@ -1516,10 +1516,10 @@ static void Layout() {
     // 状态卡
     y += rowH + (int)(4 * g_scale);
     MoveWindow(g_stat, rightX, y, rightW, statH, TRUE);
-    // 命令输入行
+    // 命令输入行（提示符高度随 DPI 缩放，写死 20px 会被大字体裁成残角）
     y += statH + (int)(4 * g_scale);
-    MoveWindow(g_topStatics[1], rightX, y + 5, (int)(30 * g_scale), 20, TRUE);
-    MoveWindow(g_cmdEdit, rightX + (int)(34 * g_scale), y, rightW - (int)(104 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(g_topStatics[1], rightX, y + (int)(2 * g_scale), (int)(34 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(g_cmdEdit, rightX + (int)(40 * g_scale), y, rightW - (int)(110 * g_scale), (int)(24 * g_scale), TRUE);
     MoveWindow(GetDlgItem(g_main, IDC_CMDRUN), rightX + rightW - (int)(64 * g_scale), y, (int)(64 * g_scale), (int)(24 * g_scale), TRUE);
     // 输出区
     y += cmdH + (int)(6 * g_scale);
