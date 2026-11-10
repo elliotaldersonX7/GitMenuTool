@@ -131,7 +131,7 @@ static std::wstring g_git, g_gh, g_repo, g_remote, g_statUrl;
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
 static bool g_pushAfterRemoteChange = false;   // 更换远端后自动强制首推
-static int g_flowBlock = -1;              // 流程卡卡点（0/1 锁定左侧按钮）
+static int g_flowBlock = -1;              // 流程卡卡点（0/1/2 任意未完成都锁定左侧按钮，③不可跳过）
 static std::wstring g_lastSkip;           // 同一卡点只提示一次
 static int g_leftScroll = 0, g_leftTotalH = 0;
 
@@ -928,7 +928,7 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
         std::vector<Seg> flow = { SegT(L"流程：", STAT_TXT, true) };
         flow.push_back(SegT(L" ① 初始化仓库 ✖ ", STAT_RED, false, BG_RED));
         flow.push_back(SegT(L" ② 配置ignore · ", STAT_DIM, false, BG_GRY));
-        flow.push_back(SegT(L" ③(可跳过) 远端+首推 · ", STAT_DIM, false, BG_GRY));
+        flow.push_back(SegT(L" ③ 远端+首推 · ", STAT_DIM, false, BG_GRY));
         lines->push_back(flow);
         lines->push_back({ SegT(L"（该目录还不是 git 仓库，点红色卡片可一键初始化）", STAT_DIM) });
         return lines;
@@ -943,11 +943,11 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     s2 = fs::exists(gi, ec) && fs::file_size(gi, ec) > 0;
     std::wstring upstream = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     s3 = !g_remote.empty() && !upstream.empty();
-    g_flowBlock = !s2 ? 1 : (!s3 ? 2 : -1);   // s1 已真；0/1 才锁按钮，2(远端)可跳过不锁
+    g_flowBlock = !s2 ? 1 : (!s3 ? 2 : -1);   // ①②③ 任一未完成都锁定按钮（③ 强制，不可跳过）
     // 流程行
     std::vector<Seg> flow = { SegT(L"流程：", STAT_TXT, true) };
     struct PillS { const wchar_t* name; bool ok; };
-    PillS pills[3] = { { L"① 初始化仓库", s1 }, { L"② 配置ignore", s2 }, { L"③(可跳过) 远端+首推", s3 } };
+    PillS pills[3] = { { L"① 初始化仓库", s1 }, { L"② 配置ignore", s2 }, { L"③ 远端+首推", s3 } };
     bool blockedMarked = false;
     for (auto& p : pills) {
         if (p.ok) flow.push_back(SegT(L" " + std::wstring(p.name) + L" ✔ ", STAT_GRN, false, BG_GRN));
@@ -1589,7 +1589,7 @@ static void PickDir() {
 
 // ============================ 流程卡锁定 ====================================
 static void FlowGate(void (*fn)(), const wchar_t* name) {
-    if (g_flowBlock == 0 || g_flowBlock == 1) {
+    if (g_flowBlock != -1) {   // 流程①②③任一未完成：锁定
         if (g_lastSkip != name) {
             g_lastSkip = name;
             OutTxt(L"流程未完成：先解决流程卡红色环节（点红卡可直接修复），【" + std::wstring(name) + L"】等后续操作暂被锁定。");
