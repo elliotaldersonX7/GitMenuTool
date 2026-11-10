@@ -358,33 +358,51 @@ static LRESULT CALLBACK RichBaseSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
         return 1;
     }
     if (m == WM_PAINT) {
-        DefSubclassProc(h, m, w, l);   // RichEdit 先自绘文字
+        DefSubclassProc(h, m, w, l);   // RichEdit 先自绘（msftedit 引擎会整块刷白，下面逐行盖回黑底）
         COLORREF base = (COLORREF)GetWindowLongPtrW(h, GWLP_USERDATA);
         HDC dc = GetDC(h);
         RECT rc; GetClientRect(h, &rc);
+        int lh = (int)(10 * g_scale * 2), cw = (int)(5 * g_scale * 2);   // 行高/字符宽兜底值
+        HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+        if (f) {
+            HDC tdc = GetDC(h);
+            HFONT of = (HFONT)SelectObject(tdc, f);
+            TEXTMETRICW tm;
+            if (GetTextMetricsW(tdc, &tm)) { lh = tm.tmHeight + tm.tmExternalLeading; cw = tm.tmAveCharWidth; }
+            SelectObject(tdc, of);
+            ReleaseDC(h, tdc);
+        }
+        HBRUSH b = CreateSolidBrush(base);
+        // 逐行补齐行尾右侧的空白（含换行空行），msftedit 只给字符格子涂底色
+        int lineCount = (int)SendMessageW(h, EM_GETLINECOUNT, 0, 0);
+        for (int i = 0; i < lineCount; ++i) {
+            int start = (int)SendMessageW(h, EM_LINEINDEX, i, 0);
+            if (start < 0) break;
+            int len = (int)SendMessageW(h, EM_LINELENGTH, start, 0);
+            POINTL pl = { 0, 0 };
+            if (len > 0) SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&pl, (LPARAM)(start + len - 1));
+            else SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&pl, (LPARAM)start);
+            if (pl.y > rc.bottom) break;         // 已滚出可视区下方，后续行更靠下
+            if (pl.y + lh < 0) continue;         // 滚出上方
+            int x0 = (len > 0 ? pl.x + cw : 0);
+            if (x0 < rc.right) {
+                RECT fr = { x0, pl.y, rc.right, pl.y + lh };
+                FillRect(dc, &fr, b);
+            }
+        }
+        // 最后一个字符行底以下的整块空白
         int len = GetWindowTextLengthW(h);
         int yTop = 0;
         if (len > 0) {
             POINTL pl = { 0, 0 };
             SendMessageW(h, EM_POSFROMCHAR, (WPARAM)&pl, (LPARAM)(len - 1));
-            int lh = (int)(10 * g_scale * 2);   // 行高兜底值
-            HFONT f = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
-            if (f) {
-                HDC tdc = GetDC(h);
-                HFONT of = (HFONT)SelectObject(tdc, f);
-                TEXTMETRICW tm;
-                if (GetTextMetricsW(tdc, &tm)) lh = tm.tmHeight + tm.tmExternalLeading;
-                SelectObject(tdc, of);
-                ReleaseDC(h, tdc);
-            }
-            yTop = pl.y + lh;   // 最后一行的行底
+            yTop = pl.y + lh;
         }
         if (yTop < rc.bottom) {
             RECT fr = { rc.left, yTop, rc.right, rc.bottom };
-            HBRUSH b = CreateSolidBrush(base);
             FillRect(dc, &fr, b);
-            DeleteObject(b);
         }
+        DeleteObject(b);
         ReleaseDC(h, dc);
         return 0;
     }
