@@ -1269,15 +1269,18 @@ static HWND MkStatic(HWND parent, const wchar_t* text, int id, int x, int y, int
     SetWindowLongPtrW(c, GWLP_USERDATA, (LONG_PTR)y);
     return c;
 }
-// 左侧面板子控件按"基准 y - 滚动量"重定位；随后只重绘暴露区（配合 WS_CLIPCHILDREN 消残影）
+// 左侧面板子控件按"基准 y - 滚动量"重定位。
+// 关键：滚动量不是节距整数倍时，MoveWindow 的新旧矩形相交区被视为有效而跳过重绘，
+// 留下错位的旧内容碎片。故搬完再把每个子控件整体失效，强制全部重绘。
 static void RepositionLeftChildren(HWND h) {
     EnumChildWindows(h, [](HWND c, LPARAM)->BOOL {
         int baseY = (int)GetWindowLongPtrW(c, GWLP_USERDATA);
         RECT r; GetWindowRect(c, &r); MapWindowPoints(nullptr, g_leftPanel, (LPPOINT)&r, 2);
-        MoveWindow(c, r.left, baseY - g_leftScroll, r.right - r.left, r.bottom - r.top, TRUE);
+        MoveWindow(c, r.left, baseY - g_leftScroll, r.right - r.left, r.bottom - r.top, FALSE);
+        InvalidateRect(c, nullptr, TRUE);
         return TRUE;
     }, 0);
-    InvalidateRect(h, nullptr, FALSE);
+    InvalidateRect(h, nullptr, FALSE);   // 面板暴露的缝隙与边条
 }
 // 滚动条几何：nMax=内容总高、nPage=可视高，滑块到底才会真正到底
 static void UpdateLeftScroll(HWND h) {
