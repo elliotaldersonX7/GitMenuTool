@@ -1375,9 +1375,23 @@ static void Layout() {
     int topH = (int)(32 * g_scale), rowH = (int)(30 * g_scale);
     int statH = (int)(150 * g_scale), cmdH = (int)(28 * g_scale);
     int leftW = (int)(244 * g_scale);
-    // 顶栏
-    MoveWindow(g_topStatics[0], m + (int)(2 * g_scale), m + 5, (int)(64 * g_scale), 20, TRUE);
-    MoveWindow(g_editDir, m + (int)(70 * g_scale), m, W - leftW - (int)(260 * g_scale), (int)(24 * g_scale), TRUE);
+    // 顶栏：标签宽度按文字实测（DPI 缩放下写死宽度会截断「操作目录:」）；输入框右缘贴「打开」按钮左缘
+    int lblX = m + (int)(2 * g_scale), lblW = (int)(64 * g_scale), lblH = 20;
+    {
+        HDC dc0 = GetDC(g_main);
+        HFONT of0 = (HFONT)SelectObject(dc0, g_fontUI);
+        SIZE sz0;
+        GetTextExtentPoint32W(dc0, L"操作目录:", 5, &sz0);
+        SelectObject(dc0, of0);
+        ReleaseDC(g_main, dc0);
+        lblW = sz0.cx + (int)(8 * g_scale);
+        lblH = sz0.cy + 6;
+    }
+    MoveWindow(g_topStatics[0], lblX, m + 5, lblW, lblH, TRUE);
+    int entryX = lblX + lblW + (int)(4 * g_scale);
+    int entryR = W - (int)(230 * g_scale) - (int)(8 * g_scale);   /* 「打开」按钮左缘留 8px */
+    if (entryR < entryX + (int)(120 * g_scale)) entryR = entryX + (int)(120 * g_scale);
+    MoveWindow(g_editDir, entryX, m, entryR - entryX, (int)(24 * g_scale), TRUE);
     // 打开 / 清空输出 放右端
     HWND open = GetDlgItem(g_main, IDC_PICKDIR), clear = GetDlgItem(g_main, IDC_CLEAROUT);
     MoveWindow(open, W - (int)(230 * g_scale), m, (int)(64 * g_scale), (int)(24 * g_scale), TRUE);
