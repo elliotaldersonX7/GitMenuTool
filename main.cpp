@@ -1278,6 +1278,12 @@ static void RepositionLeftChildren(HWND h) {
         return TRUE;
     }, 0);
 }
+// 滚动条几何：nMax=内容总高、nPage=可视高，滑块到底才会真正到底
+static void UpdateLeftScroll(HWND h) {
+    RECT rc; GetClientRect(h, &rc);
+    SCROLLINFO si = { sizeof(si), SIF_RANGE | SIF_PAGE, 0, g_leftTotalH, (UINT)rc.bottom, 0 };
+    SetScrollInfo(h, SB_VERT, &si, TRUE);
+}
 // 左侧面板：自绘滚动（子控件按基准 y - 滚动量重定位），按钮命令转发主窗口
 static LRESULT CALLBACK LeftPanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_VSCROLL) {
@@ -1351,7 +1357,7 @@ static void BuildControls() {
     g_leftPanel = CreateWindowExW(0, L"GIT_LEFT", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL,
                                   0, 0, 0, 0, g_main, (HMENU)IDC_LEFT, g_hInst, nullptr);
     int y = (int)(4 * g_scale);
-    int pw = (int)(226 * g_scale);
+    int pw = (int)(182 * g_scale);
     int catH = (int)(22 * g_scale), btnH = (int)(22 * g_scale), gap = (int)(1 * g_scale);
     for (auto& cat : MENU) {
         HWND c = MkStatic(g_leftPanel, (std::wstring(L"— ") + cat.title + L" —").c_str(), 0, 4, y, pw, catH, g_fontMenuBold);
@@ -1364,8 +1370,7 @@ static void BuildControls() {
         }
     }
     g_leftTotalH = y + (int)(8 * g_scale);
-    SCROLLINFO si = { sizeof(si), SIF_RANGE | SIF_PAGE, 0, g_leftTotalH, (UINT)(240 * g_scale), 0 };
-    SetScrollInfo(g_leftPanel, SB_VERT, &si, TRUE);
+    UpdateLeftScroll(g_leftPanel);
 }
 // 主窗口布局（按 DPI 缩放）
 static void Layout() {
@@ -1375,7 +1380,7 @@ static void Layout() {
     int m = (int)(6 * g_scale);
     int topH = (int)(32 * g_scale), rowH = (int)(30 * g_scale);
     int statH = (int)(150 * g_scale), cmdH = (int)(28 * g_scale);
-    int leftW = (int)(244 * g_scale);
+    int leftW = (int)(200 * g_scale);
     // 顶栏：标签宽度按文字实测（DPI 缩放下写死宽度会截断「操作目录:」）；输入框右缘贴「打开」按钮左缘
     int lblX = m + (int)(2 * g_scale), lblW = (int)(64 * g_scale), lblH = 20;
     {
@@ -1399,6 +1404,13 @@ static void Layout() {
     MoveWindow(clear, W - (int)(158 * g_scale), m, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
     // 左栏
     MoveWindow(g_leftPanel, 0, topH + m, leftW, H - topH - m, TRUE);
+    UpdateLeftScroll(g_leftPanel);
+    {   // 窗口变高后钳制滚动位置，滑块与内容保持一致
+        RECT lrc; GetClientRect(g_leftPanel, &lrc);
+        int maxScroll = g_leftTotalH - (lrc.bottom - lrc.top);
+        if (maxScroll < 0) maxScroll = 0;
+        if (g_leftScroll > maxScroll) { g_leftScroll = maxScroll; RepositionLeftChildren(g_leftPanel); }
+    }
     int rightX = leftW + m, rightW = W - rightX - m;
     // 状态按钮行：宽度按文字实测分配，避免小字被截断
     int y = topH + m;
