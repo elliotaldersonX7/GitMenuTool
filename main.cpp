@@ -178,11 +178,17 @@ static std::wstring QuoteArg(const std::wstring& a) {
     if (bs) q.append((size_t)bs * 2, L'\\');
     return q + L'"';
 }
-// 展示用命令行：跳过 -c i18n 配置，还原成用户熟悉的 git 命令
+// 展示用命令行：git 还原成 "git xxx"（跳过 -c 配置与全路径），学习性回显
 static std::wstring DispCmd(const std::vector<std::wstring>& argv) {
-    size_t start = (argv.size() > 3 && argv[0] == L"git" && argv[1] == L"-c") ? 3 : 0;
+    bool isGit = !argv.empty() && (argv[0] == L"git" ||
+                 (argv[0].size() > 7 && argv[0].rfind(L"git.exe") == argv[0].size() - 7));
+    if (argv.size() > 3 && isGit && argv[1] == L"-c") {
+        std::wstring s = L"git";
+        for (size_t i = 3; i < argv.size(); ++i) s += L' ' + argv[i];
+        return s;
+    }
     std::wstring s;
-    for (size_t i = start; i < argv.size(); ++i) { if (i > start) s += L' '; s += argv[i]; }
+    for (size_t i = 0; i < argv.size(); ++i) { if (i) s += L' '; s += argv[i]; }
     return s;
 }
 static std::wstring FindExe(const wchar_t* name) {
@@ -1326,7 +1332,7 @@ static void OpReleaseFw() {
 
 // ============================ 左侧菜单表 ====================================
 enum {
-    IDM_REMOTE_ADD, IDM_REMOTE_URL, IDM_REMOTE_RENAME, IDM_REMOTE_LS,
+    IDM_REMOTE_ADD = IDM_BASE, IDM_REMOTE_URL, IDM_REMOTE_RENAME, IDM_REMOTE_LS,
     IDM_CLONE, IDM_STATUS, IDM_DIFF, IDM_COMMIT, IDM_PUSH, IDM_PULL, IDM_LOG_ALL, IDM_SHOW, IDM_REMOTE_INFO,
     IDM_TAG_LIST, IDM_TAG_NEW, IDM_TAG_PUSH, IDM_TAG_DEL,
     IDM_BRANCH_SW, IDM_BRANCH_NEW, IDM_BRANCH_MERGE, IDM_BRANCH_DEL, IDM_CHECKOUT_REF, IDM_BACK_MAIN, IDM_STASH, IDM_STASH_POP,
