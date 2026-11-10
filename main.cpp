@@ -123,6 +123,7 @@ static HINSTANCE g_hInst = nullptr;
 static HWND g_main = nullptr, g_editDir = nullptr, g_stat = nullptr, g_out = nullptr;
 static HWND g_cmdEdit = nullptr, g_leftPanel = nullptr;
 static HFONT g_fontUI = nullptr, g_fontUIBold = nullptr, g_fontMono = nullptr;
+static HFONT g_fontMenu = nullptr, g_fontMenuBold = nullptr;   // 左侧菜单小两号
 static WNDPROC g_dirEditProc = nullptr, g_cmdEditProc = nullptr;
 static double g_scale = 1.0;
 
@@ -1283,7 +1284,7 @@ static LRESULT CALLBACK LeftPanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         RECT rc; GetClientRect(h, &rc);
         int maxScroll = g_leftTotalH - (rc.bottom - rc.top);
         if (maxScroll < 0) maxScroll = 0;
-        int line = (int)(28 * g_scale);
+        int line = (int)(22 * g_scale);
         int pos = g_leftScroll;
         switch (LOWORD(w)) {
             case SB_TOP: pos = 0; break;
@@ -1307,7 +1308,7 @@ static LRESULT CALLBACK LeftPanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         RECT rc; GetClientRect(h, &rc);
         int maxScroll = g_leftTotalH - (rc.bottom - rc.top);
         if (maxScroll < 0) maxScroll = 0;
-        int pos = g_leftScroll - (int)GET_WHEEL_DELTA_WPARAM(w) * (int)(28 * g_scale) / WHEEL_DELTA;
+        int pos = g_leftScroll - (int)GET_WHEEL_DELTA_WPARAM(w) * (int)(22 * g_scale) / WHEEL_DELTA;
         if (pos < 0) pos = 0;
         if (pos > maxScroll) pos = maxScroll;
         if (pos != g_leftScroll) {
@@ -1351,13 +1352,13 @@ static void BuildControls() {
                                   0, 0, 0, 0, g_main, (HMENU)IDC_LEFT, g_hInst, nullptr);
     int y = (int)(4 * g_scale);
     int pw = (int)(226 * g_scale);
-    int catH = (int)(26 * g_scale), btnH = (int)(28 * g_scale), gap = (int)(2 * g_scale);
+    int catH = (int)(22 * g_scale), btnH = (int)(22 * g_scale), gap = (int)(1 * g_scale);
     for (auto& cat : MENU) {
-        HWND c = MkStatic(g_leftPanel, (std::wstring(L"— ") + cat.title + L" —").c_str(), 0, 4, y, pw, catH, g_fontUIBold);
+        HWND c = MkStatic(g_leftPanel, (std::wstring(L"— ") + cat.title + L" —").c_str(), 0, 4, y, pw, catH, g_fontMenuBold);
         SetWindowLongPtrW(c, GWLP_USERDATA, (LONG_PTR)y);
         y += catH + gap;
         for (auto& item : cat.items) {
-            HWND b = MkBtn(g_leftPanel, item.name, item.id, 4, y, pw, btnH, g_fontUI);
+            HWND b = MkBtn(g_leftPanel, item.name, item.id, 4, y, pw, btnH, g_fontMenu);
             SetWindowLongPtrW(b, GWLP_USERDATA, (LONG_PTR)y);
             y += btnH + gap;
         }
@@ -1553,6 +1554,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_fontUI = MkFont(10, false, L"Microsoft YaHei UI");
     g_fontUIBold = MkFont(10, true, L"Microsoft YaHei UI");
     g_fontMono = MkFont(11, false, L"Consolas");
+    g_fontMenu = MkFont(8, false, L"Microsoft YaHei UI");
+    g_fontMenuBold = MkFont(8, true, L"Microsoft YaHei UI");
     // 注册左侧面板类
     WNDCLASSW wc = {};
     wc.lpfnWndProc = LeftPanelProc;
