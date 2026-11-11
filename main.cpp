@@ -1217,10 +1217,11 @@ static void OpRemoteAdd() {
     std::vector<std::wstring> rems;
     for (auto& l : SplitLines(GitOut({ L"remote" }))) { std::wstring t = Trim(l); if (!t.empty()) rems.push_back(t); }
     std::wstring rn;
-    if (!rems.empty()) {
+    if (rems.size() > 1) {
+        // 多远端才需要先选名字；单远端直接改、无远端直接加（在地址输入后判定）
         std::wstring hint;
         for (auto& r : rems) { if (!hint.empty()) hint += L", "; hint += r; }
-        auto pick = AskText(g_main, L"配置远程", Fmt(L"要配置的远端名（现有: %s）\n· 输入现有名=修改其地址\n· 留空=新增远端", hint.c_str()), g_remote);
+        auto pick = AskText(g_main, L"配置远程", Fmt(L"已存在多个远端(%s)。\n要修改的远端名（留空=新增远端）:", hint.c_str()), g_remote);
         if (!pick) return;
         if (!pick->empty()) {
             bool found = false;
@@ -1231,6 +1232,7 @@ static void OpRemoteAdd() {
     }
     auto url = AskText(g_main, L"配置远程", L"远程仓库地址:", GITEA_HINT);
     if (!url || url->empty()) return;
+    if (rn.empty() && rems.size() == 1) rn = rems[0];   // 单远端：直接修改其地址
     std::vector<std::vector<std::wstring>> cmds;
     if (!rn.empty()) {
         cmds.push_back(G({ L"remote", L"set-url", rn, *url }));
