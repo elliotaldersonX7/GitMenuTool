@@ -1105,7 +1105,7 @@ static bool EnsureRepo() {
 static bool NeedRemote() {
     // 返回 true = 已弹窗提示且调用方应中止；false = 有远端，继续执行
     if (g_remote.empty()) {
-        Warn(g_main, L"该仓库尚未配置远端。\n请先点【配置远程+首次推送】添加远端并完成首次推送，\n再使用推送/拉取等与远端相关的操作。");
+        Warn(g_main, L"该仓库尚未配置远端。\n涉及远端的操作（推送/拉取等）需要先配置：\n请点【配置远程+首次推送】添加远端地址。\n纯本地 git 管理的仓库无需配置。");
         return true;
     }
     return false;
