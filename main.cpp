@@ -129,7 +129,6 @@ static double g_scale = 1.0;
 static std::wstring g_git, g_repo, g_remote, g_statUrl;
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
-static bool g_pushAfterRemoteChange = false;   // 更换远端后自动强制首推
 static int g_flowBlock = -1;              // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；-1=流程完成。④远端+首推为可选环节，不产生卡点）
 static std::wstring g_lastSkip;           // 同一卡点只提示一次
 static int g_leftScroll = 0, g_leftTotalH = 0;
@@ -751,7 +750,7 @@ static void HandleSpecial(const std::vector<std::wstring>& argv) {
             }
         }
         JobMsg* m = new JobMsg{ 1, L"初始化完成（未提交）。下一步按流程卡：② 一键配置ignore 生成忽略规则，"
-                                   L"再【提交修改】完成首次提交，最后【配置远程+首次推送】推送到远端。" };
+                                   L"再【提交修改】完成首次提交，最后【配置远程】配好远端地址，用【推送(commit)】完成首推。" };
         PostMessageW(g_main, WM_APP_JOBMSG, (WPARAM)m, 0);
     } else if (kind == L"back_main") {
         bool done = false;
@@ -1083,7 +1082,7 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     } else {
         g_statUrl.clear();
         lines->push_back({ SegT(L"远端名称(本地别名)：", STAT_TXT, true), SegT(L"（未设置）", STAT_DIM) });
-        lines->push_back({ SegT(L"远端地址：", STAT_TXT, true), SegT(L"（未配置，可点左侧【配置远程+首次推送】）", STAT_DIM) });
+        lines->push_back({ SegT(L"远端地址：", STAT_TXT, true), SegT(L"（未配置，可点左侧【配置远程】）", STAT_DIM) });
     }
     return lines;
 }
@@ -1105,7 +1104,7 @@ static bool EnsureRepo() {
 static bool NeedRemote() {
     // 返回 true = 已弹窗提示且调用方应中止；false = 有远端，继续执行
     if (g_remote.empty()) {
-        Warn(g_main, L"该仓库尚未配置远端。\n涉及远端的操作（推送/拉取等）需要先配置：\n请点【配置远程+首次推送】添加远端地址。\n纯本地 git 管理的仓库无需配置。");
+        Warn(g_main, L"该仓库尚未配置远端。\n涉及远端的操作（推送/拉取等）需要先配置：\n请点【配置远程】添加远端地址。\n纯本地 git 管理的仓库无需配置。");
         return true;
     }
     return false;
@@ -1151,8 +1150,8 @@ static void OpShow() {
     if (sha->empty()) Exec({ G({ L"--no-pager", L"show" }) });
     else Exec({ G({ L"--no-pager", L"show", *sha }) });
 }
-// 推送核心序列（OpPush 与"更换远端后首推"共用）：无上游→fetch 后检查无关历史并询问强推
-static void DoPushCore(bool withTags) {
+// 推送核心序列（推送按钮共用）：无上游→fetch 后检查无关历史并询问强推
+static void DoPushCore() {
     if (!EnsureRepo() || NeedRemote()) return;
     std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     std::wstring br = CurBranch();
@@ -1175,14 +1174,13 @@ static void DoPushCore(bool withTags) {
     } else {
         cmds.push_back(G({ L"push" }));
     }
-    if (withTags) cmds.push_back(G({ L"push", g_remote, L"--tags" }));
     ExecV(cmds);
 }
 static void OpPush() {
     if (!EnsureRepo() || NeedRemote()) return;
     std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     if (!up.empty()) { Exec({ G({ L"push" }) }); return; }
-    DoPushCore(false);
+    DoPushCore();
 }
 /**
   ******************************************************************************
@@ -1214,42 +1212,36 @@ static void OpInitRepo() {
     std::vector<JobCmd> v; v.push_back({ { L"SPECIAL", L"init" }, false });
     ExecAsync(std::move(v));
 }
+// 配置远程：新增远端或修改现有远端地址（不推送；推送走【推送(commit)】，其中含首次推送的 -u 与无关历史询问）
 static void OpRemoteAdd() {
     if (!EnsureRepo()) return;
-    auto url = AskText(g_main, L"配置远程+首次推送", L"远程仓库地址:", GITEA_HINT);
+    std::vector<std::wstring> rems;
+    for (auto& l : SplitLines(GitOut({ L"remote" }))) { std::wstring t = Trim(l); if (!t.empty()) rems.push_back(t); }
+    std::wstring rn;
+    if (!rems.empty()) {
+        std::wstring hint;
+        for (auto& r : rems) { if (!hint.empty()) hint += L", "; hint += r; }
+        auto pick = AskText(g_main, L"配置远程", Fmt(L"要配置的远端名（现有: %s）\n· 输入现有名=修改其地址\n· 留空=新增远端", hint.c_str()), g_remote);
+        if (!pick) return;
+        if (!pick->empty()) {
+            bool found = false;
+            for (auto& r : rems) if (r == *pick) { found = true; break; }
+            if (!found) { Warn(g_main, Fmt(L"远端 %s 不存在（现有: %s）", pick->c_str(), hint.c_str())); return; }
+            rn = *pick;
+        }
+    }
+    auto url = AskText(g_main, L"配置远程", L"远程仓库地址:", GITEA_HINT);
     if (!url || url->empty()) return;
-    std::wstring br = CurBranch();
     std::vector<std::vector<std::wstring>> cmds;
-    if (!g_remote.empty()) {
-        cmds.push_back(G({ L"remote", L"set-url", g_remote, *url }));
+    if (!rn.empty()) {
+        cmds.push_back(G({ L"remote", L"set-url", rn, *url }));
     } else {
-        std::wstring rn = RemoteFromUrl(*url);
+        rn = RemoteFromUrl(*url);
         cmds.push_back(G({ L"remote", L"add", rn, *url }));
         g_remote = rn;
     }
-    cmds.push_back(G({ L"push", L"-u", g_remote, br }));
-    cmds.push_back(G({ L"push", g_remote, L"--tags" }));
+    cmds.push_back(G({ L"remote", L"-v" }));
     ExecV(cmds);
-}
-static void OpRemoteUrl() {
-    if (!EnsureRepo() || NeedRemote()) return;
-    std::vector<std::wstring> rems;
-    for (auto& l : SplitLines(GitOut({ L"remote" }))) { std::wstring t = Trim(l); if (!t.empty()) rems.push_back(t); }
-    if (rems.empty()) return;
-    std::wstring rn = g_remote;
-    if (rems.size() > 1) {
-        std::wstring hint;
-        for (auto& r : rems) { if (!hint.empty()) hint += L", "; hint += r; }
-        auto pick = AskText(g_main, L"更换远端地址", Fmt(L"要修改的远端名(%s):", hint.c_str()), g_remote);
-        if (!pick || pick->empty()) return;
-        bool found = false;
-        for (auto& r : rems) if (r == *pick) { found = true; rn = *pick; }
-        if (!found) { Warn(g_main, Fmt(L"远端 %s 不存在（现有: %s）", pick->c_str(), hint.c_str())); return; }
-    }
-    auto url = AskText(g_main, L"更换远端地址", L"新的仓库地址:");
-    if (!url || url->empty()) return;
-    g_pushAfterRemoteChange = true;   // 改完地址后自动强制首推（用户要求，不再询问）
-    ExecV({ G({ L"remote", L"set-url", rn, *url }), G({ L"remote", L"-v" }) });
 }
 static void OpRemoteRename() {
     if (!EnsureRepo() || NeedRemote()) return;
@@ -1483,7 +1475,7 @@ static void OpResetGit() {
 }
 // ============================ 左侧菜单表 ====================================
 enum {
-    IDM_REMOTE_ADD = IDM_BASE, IDM_REMOTE_URL, IDM_REMOTE_RENAME, IDM_REMOTE_LS,
+    IDM_REMOTE_ADD = IDM_BASE, IDM_REMOTE_RENAME, IDM_REMOTE_LS,
     IDM_CLONE, IDM_STATUS, IDM_DIFF, IDM_COMMIT, IDM_PUSH, IDM_FORCE_PUSH, IDM_PULL, IDM_LOG_ALL, IDM_SHOW, IDM_REMOTE_INFO,
     IDM_TAG_LIST, IDM_TAG_NEW, IDM_TAG_PUSH, IDM_TAG_DEL,
     IDM_BRANCH_SW, IDM_BRANCH_NEW, IDM_BRANCH_MERGE, IDM_BRANCH_DEL, IDM_CHECKOUT_REF, IDM_BACK_MAIN, IDM_STASH, IDM_STASH_POP,
@@ -1494,8 +1486,7 @@ struct MenuItem { int id; const wchar_t* name; void (*fn)(); };
 struct MenuCat  { const wchar_t* title; std::vector<MenuItem> items; };
 static const MenuCat MENU[] = {
     { L"远端", {
-        { IDM_REMOTE_ADD,    L"配置远程+首次推送", OpRemoteAdd },
-        { IDM_REMOTE_URL,    L"更换远端地址",     OpRemoteUrl },
+        { IDM_REMOTE_ADD,    L"配置远程",         OpRemoteAdd },
         { IDM_REMOTE_RENAME, L"远端改名(本地别名)", OpRemoteRename },
         { IDM_REMOTE_LS,     L"验证远端连通",     OpRemoteLs },
     } },
@@ -1639,7 +1630,7 @@ static bool FlowAllowed(int id) {
     // 导航与恢复类（防死锁）
     case IDM_BRANCH_SW: case IDM_BACK_MAIN: case IDM_CHECKOUT_REF:
     case IDM_STASH: case IDM_STASH_POP:
-    // 完成首推所需（含全新仓库配置远端：③ 卡红时必须能点【配置远程+首次推送】，否则死锁）
+    // 完成首推所需（含全新仓库配置远端：卡红时必须能点【配置远程】，否则死锁）
     case IDM_COMMIT: case IDM_PUSH: case IDM_PULL: case IDM_REMOTE_ADD:
         return true;
     }
@@ -1999,11 +1990,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_APP_JOBDONE:
         g_busy = false;
         RefreshStatusAsync();
-        if (g_pushAfterRemoteChange) {
-            g_pushAfterRemoteChange = false;
-            OutTxt(L"已更换远端地址，自动推送当前分支和标签到新远端……");
-            DoPushCore(true);
-        }
         return 0;
     case WM_APP_STATUS:
         g_statusRunning = false;
