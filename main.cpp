@@ -1128,7 +1128,6 @@ static void OpPull()        { if (!EnsureRepo() || NeedRemote()) return; Exec({ 
 static void OpTagList()     { Exec({ G({ L"tag", L"-l" }) }); }
 static void OpTagPush()     { if (NeedRemote()) return; Exec({ G({ L"push", g_remote, L"--tags" }) }); }
 static void OpRemoteInfo()  { if (NeedRemote()) return; Exec({ G({ L"remote", L"-v" }), G({ L"branch", L"-vv" }) }); }
-static void OpRemoteLs()    { if (NeedRemote()) return; Exec({ G({ L"ls-remote", L"--heads", g_remote }) }); }
 static void OpStash()       { Exec({ G({ L"stash" }) }); }
 static void OpStashPop()    { Exec({ G({ L"stash", L"pop" }) }); }
 static void OpBackMain()    { std::vector<JobCmd> v; v.push_back({ { L"SPECIAL", L"back_main" }, false }); ExecAsync(std::move(v)); }
@@ -1475,7 +1474,7 @@ static void OpResetGit() {
 }
 // ============================ 左侧菜单表 ====================================
 enum {
-    IDM_REMOTE_ADD = IDM_BASE, IDM_REMOTE_RENAME, IDM_REMOTE_LS,
+    IDM_REMOTE_ADD = IDM_BASE, IDM_REMOTE_RENAME,
     IDM_CLONE, IDM_STATUS, IDM_DIFF, IDM_COMMIT, IDM_PUSH, IDM_FORCE_PUSH, IDM_PULL, IDM_LOG_ALL, IDM_SHOW, IDM_REMOTE_INFO,
     IDM_TAG_LIST, IDM_TAG_NEW, IDM_TAG_PUSH, IDM_TAG_DEL,
     IDM_BRANCH_SW, IDM_BRANCH_NEW, IDM_BRANCH_MERGE, IDM_BRANCH_DEL, IDM_CHECKOUT_REF, IDM_BACK_MAIN, IDM_STASH, IDM_STASH_POP,
@@ -1488,7 +1487,6 @@ static const MenuCat MENU[] = {
     { L"远端", {
         { IDM_REMOTE_ADD,    L"配置远程",         OpRemoteAdd },
         { IDM_REMOTE_RENAME, L"远端改名(本地别名)", OpRemoteRename },
-        { IDM_REMOTE_LS,     L"验证远端连通",     OpRemoteLs },
     } },
     { L"日常", {
         { IDM_CLONE,        L"克隆仓库",   OpClone },
@@ -1626,7 +1624,7 @@ static bool FlowAllowed(int id) {
     switch (id) {
     // 只读查看类
     case IDM_STATUS: case IDM_DIFF: case IDM_LOG_ALL: case IDM_SHOW:
-    case IDM_REMOTE_INFO: case IDM_TAG_LIST: case IDM_REMOTE_LS:
+    case IDM_REMOTE_INFO: case IDM_TAG_LIST:
     // 导航与恢复类（防死锁）
     case IDM_BRANCH_SW: case IDM_BACK_MAIN: case IDM_CHECKOUT_REF:
     case IDM_STASH: case IDM_STASH_POP:
