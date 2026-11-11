@@ -1125,7 +1125,7 @@ static std::wstring RemoteFromUrl(const std::wstring& url) {
 // ============================ 各操作 ========================================
 static void OpStatus()      { Exec({ G({ L"status" }) }); }
 static void OpDiff()        { Exec({ G({ L"diff" }), G({ L"diff", L"--staged" }) }); }
-static void OpPull()        { Exec({ G({ L"pull", L"--no-edit" }) }); }
+static void OpPull()        { if (!EnsureRepo() || NeedRemote()) return; Exec({ G({ L"pull", L"--no-edit" }) }); }
 static void OpTagList()     { Exec({ G({ L"tag", L"-l" }) }); }
 static void OpTagPush()     { if (NeedRemote()) return; Exec({ G({ L"push", g_remote, L"--tags" }) }); }
 static void OpRemoteInfo()  { if (NeedRemote()) return; Exec({ G({ L"remote", L"-v" }), G({ L"branch", L"-vv" }) }); }
