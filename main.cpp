@@ -130,7 +130,7 @@ static std::wstring g_git, g_repo, g_remote, g_statUrl;
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
 static bool g_pushAfterRemoteChange = false;   // 更换远端后自动强制首推
-static int g_flowBlock = -1;              // 流程卡卡点（0/1/2 任意未完成都锁定左侧按钮，③不可跳过）
+static int g_flowBlock = -1;              // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；3=④远端+首推：白名单放行；-1=全部完成）
 static std::wstring g_lastSkip;           // 同一卡点只提示一次
 static int g_leftScroll = 0, g_leftTotalH = 0;
 
@@ -999,32 +999,41 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
         g_flowBlock = -1;
         return lines;
     }
+    // ① 全局配置：user.name 与 user.email 均非空才算完成
+    bool s0 = !Trim(GitOut({ L"config", L"--global", L"user.name" })).empty()
+           && !Trim(GitOut({ L"config", L"--global", L"user.email" })).empty();
     bool inRepo = Trim(GitOut({ L"rev-parse", L"--is-inside-work-tree" })) == L"true";
-    if (!inRepo) {
-        g_flowBlock = 0;
+    // 流程行四环节：①全局配置 ②初始化仓库 ③配置ignore ④远端+首推
+    struct PillS { const wchar_t* name; bool ok; };
+    if (!s0 || !inRepo) {
+        g_flowBlock = !s0 ? 0 : 1;   // ①②未完成：左侧栏整体置灰禁点（全局配置/初始化均可在顶栏完成）
+        PillS pills[4] = { { L"① 全局配置", s0 }, { L"② 初始化仓库", inRepo }, { L"③ 配置ignore", false }, { L"④ 远端+首推", false } };
         std::vector<Seg> flow = { SegT(L"流程：", STAT_TXT, true) };
-        flow.push_back(SegT(L" ① 初始化仓库 ✖ ", STAT_RED, false, BG_RED));
-        flow.push_back(SegT(L" ② 配置ignore · ", STAT_DIM, false, BG_GRY));
-        flow.push_back(SegT(L" ③ 远端+首推 · ", STAT_DIM, false, BG_GRY));
+        bool blockedMarked = false;
+        for (auto& p : pills) {
+            if (p.ok) flow.push_back(SegT(L" " + std::wstring(p.name) + L" ✔ ", STAT_GRN, false, BG_GRN));
+            else if (!blockedMarked) { blockedMarked = true; flow.push_back(SegT(L" " + std::wstring(p.name) + L" ✖ ", STAT_RED, false, BG_RED)); }
+            else flow.push_back(SegT(L" " + std::wstring(p.name) + L" · ", STAT_DIM, false, BG_GRY));
+        }
         lines->push_back(flow);
-        lines->push_back({ SegT(L"（该目录还不是 git 仓库，请点顶栏或左侧【✚ 初始化仓库】）", STAT_DIM) });
+        if (!s0) lines->push_back({ SegT(L"（请先点顶栏【⚙ 修改全局配置】填写 user.name 与 user.email）", STAT_DIM) });
+        else     lines->push_back({ SegT(L"（该目录还不是 git 仓库，请点顶栏【✚ 初始化仓库】）", STAT_DIM) });
         return lines;
     }
     g_remote = DetectRemote();
     std::wstring branch = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"HEAD" }));
     if (branch.empty()) branch = L"（空）";
-    // 流程三环节状态
-    bool s1 = true, s2 = false, s3 = false;
+    // ③④ 环节状态
+    bool s2 = false, s3 = false;
     std::error_code ec;
     fs::path gi = fs::path(g_repo) / L".gitignore";
     s2 = fs::exists(gi, ec) && fs::file_size(gi, ec) > 0;
     std::wstring upstream = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     s3 = !g_remote.empty() && !upstream.empty();
-    g_flowBlock = !s2 ? 1 : (!s3 ? 2 : -1);   // ①②③ 任一未完成都锁定按钮（③ 强制，不可跳过）
+    g_flowBlock = !s2 ? 2 : (!s3 ? 3 : -1);   // ③未完成锁全部；④未完成按白名单放行（强制，不可跳过）
     // 流程行
     std::vector<Seg> flow = { SegT(L"流程：", STAT_TXT, true) };
-    struct PillS { const wchar_t* name; bool ok; };
-    PillS pills[3] = { { L"① 初始化仓库", s1 }, { L"② 配置ignore", s2 }, { L"③ 远端+首推", s3 } };
+    PillS pills[4] = { { L"① 全局配置", true }, { L"② 初始化仓库", true }, { L"③ 配置ignore", s2 }, { L"④ 远端+首推", s3 } };
     bool blockedMarked = false;
     for (auto& p : pills) {
         if (p.ok) flow.push_back(SegT(L" " + std::wstring(p.name) + L" ✔ ", STAT_GRN, false, BG_GRN));
@@ -1616,9 +1625,10 @@ static void PickDir() {
 }
 
 // ============================ 流程卡锁定 ====================================
-// 流程①②③任一未完成时锁定破坏类按钮；以下三类豁免：
+// 流程④（远端+首推）未完成时锁定破坏类按钮；以下三类豁免：
 // ① 只读查看类（无害且便于诊断）② 导航/恢复类（防流程锁死：新建分支后必须能切回/能 stash）
-// ③ 完成首推所需（新分支上提交+推送后 ③ 变绿，其余按钮自动解锁）
+// ③ 完成首推所需（配置远端/提交/推送后 ④ 变绿，其余按钮自动解锁）
+// 注：流程①②③（全局配置/初始化/ignore）未完成时左侧栏整体置灰禁点，不走本门槛
 static bool FlowAllowed(int id) {
     switch (id) {
     // 只读查看类
@@ -1634,7 +1644,7 @@ static bool FlowAllowed(int id) {
     return false;
 }
 static void FlowGate(void (*fn)(), const wchar_t* name, int id) {
-    if (g_flowBlock != -1 && !FlowAllowed(id)) {   // 流程①②③任一未完成：锁定（只读除外）
+    if (g_flowBlock != -1 && !FlowAllowed(id)) {   // 流程④未完成：锁定（只读与首推所需除外；①②③未完成时左栏本身禁点）
         if (g_lastSkip != name) {
             g_lastSkip = name;
             OutTxt(L"流程未完成：先在左侧完成流程卡红色环节，【" + std::wstring(name) + L"】等后续操作暂被锁定。");
@@ -1677,6 +1687,10 @@ static int LeftHitTest(HWND h, int my) {
             return i;
     return -1;
 }
+// 流程①②③（全局配置/初始化/ignore）任一未完成：左侧栏整体置灰禁点（三项配置都在顶栏完成，不会死锁）
+static bool LeftLocked() {
+    return g_flowBlock >= 0 && g_flowBlock <= 2;
+}
 static void LeftScrollTo(HWND h, int pos) {
     RECT rc; GetClientRect(h, &rc);
     int maxScroll = g_leftTotalH - (rc.bottom - rc.top);
@@ -1717,17 +1731,20 @@ static LRESULT CALLBACK LeftPanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 RECT tr = { 0, y, rc.right, y + it.h };
                 DrawTextW(mem, t.c_str(), -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             } else {
-                bool hov = (i == g_leftHover), prs = (i == g_leftPressed);
+                bool lock = LeftLocked();
+                bool hov = !lock && (i == g_leftHover), prs = !lock && (i == g_leftPressed);
                 RECT br = { 4, y, 4 + bw, y + it.h };
-                HBRUSH fill = CreateSolidBrush(prs ? RGB(0xdc, 0xe9, 0xfd)
-                                                   : hov ? RGB(0xe8, 0xf0, 0xfe) : RGB(0xff, 0xff, 0xff));
+                HBRUSH fill = CreateSolidBrush(lock ? RGB(0xf2, 0xf2, 0xf2)
+                                                    : prs ? RGB(0xdc, 0xe9, 0xfd)
+                                                    : hov ? RGB(0xe8, 0xf0, 0xfe) : RGB(0xff, 0xff, 0xff));
                 FillRect(mem, &br, fill);
                 DeleteObject(fill);
-                HBRUSH frame = CreateSolidBrush((hov || prs) ? RGB(0x1a, 0x73, 0xe8) : RGB(0xad, 0xad, 0xad));
+                HBRUSH frame = CreateSolidBrush(lock ? RGB(0xc8, 0xc8, 0xc8)
+                                                     : (hov || prs) ? RGB(0x1a, 0x73, 0xe8) : RGB(0xad, 0xad, 0xad));
                 FrameRect(mem, &br, frame);
                 DeleteObject(frame);
                 SelectObject(mem, g_fontMenu);
-                SetTextColor(mem, RGB(0x1a, 0x1a, 0x1a));
+                SetTextColor(mem, lock ? RGB(0xa6, 0xa6, 0xa6) : RGB(0x1a, 0x1a, 0x1a));
                 DrawTextW(mem, it.name.c_str(), -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
         }
@@ -1739,7 +1756,7 @@ static LRESULT CALLBACK LeftPanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_MOUSEMOVE: {
-        int hit = LeftHitTest(h, (short)HIWORD(l));
+        int hit = LeftLocked() ? -1 : LeftHitTest(h, (short)HIWORD(l));
         if (hit != g_leftHover) {
             g_leftHover = hit;
             InvalidateRect(h, nullptr, FALSE);
@@ -1756,6 +1773,7 @@ static LRESULT CALLBACK LeftPanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (g_leftHover != -1) { g_leftHover = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_LBUTTONDOWN:
+        if (LeftLocked()) return 0;   // 流程未配置完：点击无效
         g_leftPressed = LeftHitTest(h, (short)HIWORD(l));
         if (g_leftPressed != -1) {
             SetCapture(h);
@@ -1988,6 +2006,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_APP_STATUS:
         g_statusRunning = false;
         RenderStatus((std::vector<std::vector<Seg>>*)w);
+        InvalidateRect(g_leftPanel, nullptr, FALSE);   // g_flowBlock 可能变化，左栏灰/亮态同步重绘
         return 0;
     case WM_TIMER:
         // 定时自动刷新状态卡：感知工具外部的改动（他处提交/推送/切分支），空闲时才刷新
