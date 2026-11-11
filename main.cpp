@@ -43,7 +43,6 @@ namespace fs = std::filesystem;
 #define IDC_REFRESH   110
 #define IDC_GLOBALCFG 111
 #define IDC_INIT      112
-#define IDC_RELEASE   113
 #define IDC_IGNORE    114
 #define IDC_OPENIGN   115
 #define IDC_RESET     116
@@ -127,7 +126,7 @@ static HFONT g_fontMenu = nullptr, g_fontMenuBold = nullptr;   // 左侧菜单�
 static WNDPROC g_dirEditProc = nullptr, g_cmdEditProc = nullptr;
 static double g_scale = 1.0;
 
-static std::wstring g_git, g_gh, g_repo, g_remote, g_statUrl;
+static std::wstring g_git, g_repo, g_remote, g_statUrl;
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
 static bool g_pushAfterRemoteChange = false;   // 更换远端后自动强制首推
@@ -736,7 +735,7 @@ static void ExecV(std::vector<std::vector<std::wstring>> cmds) {
     for (auto& c : cmds) v.push_back({ c, false });
     ExecAsync(std::move(v));
 }
-// SPECIAL：init（一键初始化）/ relweb（无 gh 时打开 GitHub 发布页）/ back_main（回主分支）
+// SPECIAL：init（一键初始化）/ back_main（回主分支）
 static void HandleSpecial(const std::vector<std::wstring>& argv) {
     const std::wstring kind = argv[1];
     if (kind == L"init") {
@@ -754,17 +753,6 @@ static void HandleSpecial(const std::vector<std::wstring>& argv) {
         JobMsg* m = new JobMsg{ 1, L"初始化完成（未提交）。下一步按流程卡：② 一键配置ignore 生成忽略规则，"
                                    L"再【提交修改】完成首次提交，最后【配置远程+首次推送】推送到远端。" };
         PostMessageW(g_main, WM_APP_JOBMSG, (WPARAM)m, 0);
-    } else if (kind == L"relweb" && argv.size() >= 3) {
-        std::wstring url = GitOut({ L"config", L"--get", L"remote." + g_remote + L".url" });
-        std::wregex re(L"github\\.com[/:]([^/]+/[^/]+?)(?:\\.git)?/?$");
-        std::wsmatch m;
-        if (std::regex_search(url, m, re)) {
-            std::wstring page = L"https://github.com/" + m[1].str() + L"/releases/new?tag=" + argv[2];
-            ShellExecuteW(nullptr, L"open", page.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        } else {
-            JobMsg* e = new JobMsg{ 1, L"未安装 gh 命令行，且远端平台无法识别，无法自动打开发布页。" };
-            PostMessageW(g_main, WM_APP_JOBMSG, (WPARAM)e, 0);
-        }
     } else if (kind == L"back_main") {
         bool done = false;
         for (const wchar_t* b : { L"main", L"master" }) {
@@ -1371,81 +1359,6 @@ static void OpResetGit() {
     OutTxt(L"需要重来可点【✚ 初始化仓库】。");
     RefreshStatusAsync();
 }
-// 发布固件：四重校验（代码已推/工作区干净/挂 tag/固件比源码新）后推送并发布
-static void OpReleaseFw() {
-    if (!EnsureRepo() || NeedRemote()) return;
-    if (Trim(GitOut({ L"rev-parse", L"--is-inside-work-tree" })) != L"true") {
-        Warn(g_main, L"当前目录还未初始化 Git，请先【✚ 初始化仓库】。"); return;
-    }
-    // 检查0：本地与远端必须同步——先推代码，才允许发布固件
-    GitOut({ L"fetch", L"--quiet" }, 120000);
-    std::wstring br = CurBranch();
-    std::wstring rh = Trim(GitOut({ L"rev-parse", L"-q", L"--verify", g_remote + L"/" + br }));
-    if (rh.empty()) {
-        Warn(g_main, Fmt(L"检查0未通过：远端没有 %s 分支，请先点【推送】把代码推上去，再发布固件。", br.c_str()));
-        return;
-    }
-    std::wstring head = Trim(GitOut({ L"rev-parse", L"HEAD" }));
-    if (head != rh) {
-        std::wstring n = Trim(GitOut({ L"rev-list", L"--count", g_remote + L"/" + br + L"..HEAD" }));
-        Warn(g_main, Fmt(L"检查0未通过：本地有 %s 个提交还没推送到远端（或与远端不一致），\n请先点【推送】同步远端代码，再发布固件。", n.c_str()));
-        return;
-    }
-    // 检查1：工作区必须干净
-    if (!Trim(GitOut({ L"status", L"--porcelain" })).empty()) {
-        Warn(g_main, L"检查1未通过：存在未提交改动，必须先【提交修改】再发布固件。");
-        return;
-    }
-    // 检查2：HEAD 必须挂在 tag 上，没有则即时打上
-    std::wstring tag = Trim(GitOut({ L"describe", L"--tags", L"--exact-match", L"HEAD" }));
-    if (tag.empty()) {
-        auto t = AskText(g_main, L"检查2未通过：当前提交还没有标签", L"输入本次发布的标签名（如 v1.0），留空取消：");
-        if (!t || t->empty()) return;
-        tag = *t;
-        GitResult r = RunGit(G({ L"tag", tag }), g_repo, 10000);
-        if (r.rc != 0) { Warn(g_main, L"打标签失败：\n" + r.out); return; }
-        OutCmd(L"已打标签: " + tag);
-    }
-    // 选固件文件
-    std::wstring bin = OpenFileDialog(g_main, L"选择本次发布的固件文件（bin/hex）",
-                                      L"固件文件(*.bin;*.hex)\0*.bin;*.hex\0所有文件(*.*)\0*.*\0");
-    if (bin.empty()) return;
-    // 检查3：被跟踪的源文件比固件新 → 编译后又改过代码
-    std::error_code ec;
-    auto binTime = fs::last_write_time(fs::path(bin), ec);
-    if (ec) { Warn(g_main, L"读取固件文件时间失败。"); return; }
-    std::vector<std::wstring> newer;
-    for (auto& l : SplitLines(GitOut({ L"ls-files" }))) {
-        std::wstring f = Trim(l);
-        if (f.empty()) continue;
-        fs::path fp = fs::path(g_repo) / f;
-        std::error_code ec2;
-        if (!fs::is_regular_file(fp, ec2)) continue;
-        auto ft = fs::last_write_time(fp, ec2);
-        if (!ec2 && ft > binTime + std::chrono::seconds(60)) newer.push_back(f);
-    }
-    if (!newer.empty()) {
-        std::wstring msg = L"检查3未通过：以下被跟踪的源文件比所选固件新，说明编译后又改过代码：\n\n";
-        size_t cnt = 0;
-        for (auto& f : newer) { if (cnt++ >= 15) { msg += L"...\n"; break; } msg += f + L"\n"; }
-        msg += L"\n请重新编译后再发布（或选择新编译的固件文件）。";
-        Warn(g_main, msg.c_str());
-        return;
-    }
-    auto notes = AskText(g_main, L"发布固件", L"Release 说明（可留空）:");
-    if (!notes) return;
-    std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
-    std::vector<std::vector<std::wstring>> cmds;
-    if (!up.empty()) cmds.push_back(G({ L"push", g_remote }));
-    else cmds.push_back(G({ L"push", L"-u", g_remote, br }));
-    cmds.push_back(G({ L"push", g_remote, L"tag", tag }));
-    if (!g_gh.empty())
-        cmds.push_back({ g_gh, L"release", L"create", tag, bin, L"--title", tag, L"--notes", notes->empty() ? tag : *notes });
-    else
-        cmds.push_back({ L"SPECIAL", L"relweb", tag });
-    ExecV(cmds);
-}
-
 // ============================ 左侧菜单表 ====================================
 enum {
     IDM_REMOTE_ADD = IDM_BASE, IDM_REMOTE_URL, IDM_REMOTE_RENAME, IDM_REMOTE_LS,
@@ -1784,7 +1697,6 @@ static void BuildControls() {
     MkBtn(g_main, L"⟳ 刷新状态", IDC_REFRESH, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"⚙ 修改全局配置", IDC_GLOBALCFG, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"✚ 初始化仓库", IDC_INIT, 0, 0, 0, 0, g_fontUI);
-    MkBtn(g_main, L"⬆ 发布固件", IDC_RELEASE, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"⤓ 一键配置ignore", IDC_IGNORE, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L">_ 打开 .gitignore", IDC_OPENIGN, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"清空Git重来", IDC_RESET, 0, 0, 0, 0, g_fontUI);
@@ -1857,12 +1769,12 @@ static void Layout() {
     int rightX = leftW + m, rightW = W - rightX - m;
     // 状态按钮行：宽度按文字实测分配，避免小字被截断
     int y = topH + m;
-    int idsSbar[7] = { IDC_REFRESH, IDC_GLOBALCFG, IDC_INIT, IDC_RELEASE, IDC_IGNORE, IDC_OPENIGN, IDC_RESET };
-    int wtxt[7]; int total = 0;
+    int idsSbar[6] = { IDC_REFRESH, IDC_GLOBALCFG, IDC_INIT, IDC_IGNORE, IDC_OPENIGN, IDC_RESET };
+    int wtxt[6]; int total = 0;
     HDC dc = GetDC(g_main);
     HFONT of = (HFONT)SelectObject(dc, g_fontUI);
     SIZE sz;
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < 6; ++i) {
         wchar_t t[64]; GetDlgItemTextW(g_main, idsSbar[i], t, 64);
         GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
         wtxt[i] = sz.cx + (int)(22 * g_scale);
@@ -1870,11 +1782,11 @@ static void Layout() {
     }
     SelectObject(dc, of);
     ReleaseDC(g_main, dc);
-    total += 6 * (int)(4 * g_scale);
+    total += 5 * (int)(4 * g_scale);
     int avail = rightW - (int)(8 * g_scale);
     double fit = total > avail ? (double)avail / total : 1.0;
     int x2 = rightX;
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < 6; ++i) {
         int w2 = (int)(wtxt[i] * fit) - (int)(4 * g_scale);
         MoveWindow(GetDlgItem(g_main, idsSbar[i]), x2, y, w2, rowH, TRUE);
         x2 += w2 + (int)(4 * g_scale);
@@ -1922,7 +1834,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id == IDC_REFRESH) { RefreshStatusAsync(); return 0; }
         if (id == IDC_GLOBALCFG) { OpGlobalCfg(); return 0; }
         if (id == IDC_INIT) { OpInitRepo(); return 0; }
-        if (id == IDC_RELEASE) { OpReleaseFw(); return 0; }
         if (id == IDC_IGNORE) { OpIgnoreCfg(); return 0; }
         if (id == IDC_OPENIGN) { OpOpenIgnore(); return 0; }
         if (id == IDC_RESET) { OpResetGit(); return 0; }
@@ -2003,12 +1914,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     LoadLibraryW(L"Riched20.dll");   // RichEdit 控件库（RICHEDIT_CLASS）
     g_git = FindExe(L"git");
     if (g_git.empty()) { MessageBoxW(nullptr, L"未检测到 Git，请先安装 Git for Windows。", APP_TITLE, MB_ICONERROR); return 1; }
-    g_gh = FindExe(L"gh");
-    if (g_gh.empty()) {
-        fs::path p = fs::path(ExeDir()) / L"gh.exe";
-        std::error_code ec;
-        if (fs::exists(p, ec)) g_gh = p.wstring();
-    }
     g_scale = GetDeviceCaps(GetDC(nullptr), LOGPIXELSX) / 96.0;
     g_fontUI = MkFont(10, false, L"Microsoft YaHei UI");
     g_fontUIBold = MkFont(10, true, L"Microsoft YaHei UI");
