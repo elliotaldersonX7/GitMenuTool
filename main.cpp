@@ -1109,6 +1109,18 @@ static bool NeedRemote() {
     }
     return false;
 }
+// 仓库是否已有提交（刚初始化未首次提交时 HEAD 不存在，推送/拉取均无意义）
+static bool HasCommits() {
+    return !Trim(GitOut({ L"rev-parse", L"-q", L"--verify", L"HEAD" })).empty();
+}
+static bool NeedCommit() {
+    // 返回 true = 尚无提交已弹窗提示且调用方应中止
+    if (!HasCommits()) {
+        Warn(g_main, L"当前分支还没有任何提交（分支为空）。\n推送/拉取前请先点【提交修改】完成首次提交。");
+        return true;
+    }
+    return false;
+}
 static std::wstring CurBranch() {
     std::wstring b = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"HEAD" }));
     return b.empty() ? L"main" : b;
@@ -1124,7 +1136,7 @@ static std::wstring RemoteFromUrl(const std::wstring& url) {
 // ============================ 各操作 ========================================
 static void OpStatus()      { Exec({ G({ L"status" }) }); }
 static void OpDiff()        { Exec({ G({ L"diff" }), G({ L"diff", L"--staged" }) }); }
-static void OpPull()        { if (!EnsureRepo() || NeedRemote()) return; Exec({ G({ L"pull", L"--no-edit" }) }); }
+static void OpPull()        { if (!EnsureRepo() || NeedRemote() || NeedCommit()) return; Exec({ G({ L"pull", L"--no-edit" }) }); }
 static void OpTagList()     { Exec({ G({ L"tag", L"-l" }) }); }
 static void OpTagPush()     { if (NeedRemote()) return; Exec({ G({ L"push", g_remote, L"--tags" }) }); }
 static void OpRemoteInfo()  { if (NeedRemote()) return; Exec({ G({ L"remote", L"-v" }), G({ L"branch", L"-vv" }) }); }
@@ -1151,7 +1163,7 @@ static void OpShow() {
 }
 // 推送核心序列（推送按钮共用）：无上游→fetch 后检查无关历史并询问强推
 static void DoPushCore() {
-    if (!EnsureRepo() || NeedRemote()) return;
+    if (!EnsureRepo() || NeedRemote() || NeedCommit()) return;
     std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     std::wstring br = CurBranch();
     GitOut({ L"fetch", L"--quiet", g_remote }, 120000);
@@ -1191,7 +1203,7 @@ static void OpPush() {
   ******************************************************************************
   */
 static void OpForcePush() {
-    if (!EnsureRepo() || NeedRemote()) return;
+    if (!EnsureRepo() || NeedRemote() || NeedCommit()) return;
     std::wstring br = CurBranch();
     std::wstring note = L"强制推送会用本地 " + br + L" 历史整体覆盖远端：\n"
                         L"· 远端上本地没有的提交将被丢弃（无法恢复）\n"
