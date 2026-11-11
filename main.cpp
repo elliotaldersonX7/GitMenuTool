@@ -1007,7 +1007,7 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
         flow.push_back(SegT(L" ② 配置ignore · ", STAT_DIM, false, BG_GRY));
         flow.push_back(SegT(L" ③ 远端+首推 · ", STAT_DIM, false, BG_GRY));
         lines->push_back(flow);
-        lines->push_back({ SegT(L"（该目录还不是 git 仓库，点红色卡片可一键初始化）", STAT_DIM) });
+        lines->push_back({ SegT(L"（该目录还不是 git 仓库，请点顶栏或左侧【✚ 初始化仓库】）", STAT_DIM) });
         return lines;
     }
     g_remote = DetectRemote();
@@ -1603,8 +1603,8 @@ static bool FlowAllowed(int id) {
     // 导航与恢复类（防死锁）
     case IDM_BRANCH_SW: case IDM_BACK_MAIN: case IDM_CHECKOUT_REF:
     case IDM_STASH: case IDM_STASH_POP:
-    // 完成首推所需
-    case IDM_COMMIT: case IDM_PUSH: case IDM_PULL:
+    // 完成首推所需（含全新仓库配置远端：③ 卡红时必须能点【配置远程+首次推送】，否则死锁）
+    case IDM_COMMIT: case IDM_PUSH: case IDM_PULL: case IDM_REMOTE_ADD:
         return true;
     }
     return false;
@@ -1613,7 +1613,7 @@ static void FlowGate(void (*fn)(), const wchar_t* name, int id) {
     if (g_flowBlock != -1 && !FlowAllowed(id)) {   // 流程①②③任一未完成：锁定（只读除外）
         if (g_lastSkip != name) {
             g_lastSkip = name;
-            OutTxt(L"流程未完成：先解决流程卡红色环节（点红卡可直接修复），【" + std::wstring(name) + L"】等后续操作暂被锁定。");
+            OutTxt(L"流程未完成：先在左侧完成流程卡红色环节，【" + std::wstring(name) + L"】等后续操作暂被锁定。");
         }
         return;
     }
