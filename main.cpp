@@ -130,7 +130,6 @@ static std::wstring g_git, g_repo, g_remote, g_statUrl;
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
 static int g_flowBlock = -1;              // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；-1=流程完成。④远端+首推为可选环节，不产生卡点）
-static std::wstring g_lastSkip;           // 同一卡点只提示一次
 static int g_leftScroll = 0, g_leftTotalH = 0;
 
 // ============================ 基础工具 ======================================
@@ -1250,6 +1249,7 @@ static void OpRemoteAdd() {
         cmds.push_back(G({ L"remote", L"set-url", rn, *url }));
     } else {
         rn = RemoteFromUrl(*url);
+        for (auto& r : rems) if (r == rn) { Warn(g_main, Fmt(L"从地址推断的远端名 %s 已存在，请先改名现有远端或换地址。", rn.c_str())); return; }
         cmds.push_back(G({ L"remote", L"add", rn, *url }));
         g_remote = rn;
     }
@@ -1631,33 +1631,9 @@ static void PickDir() {
 }
 
 // ============================ 流程卡锁定 ====================================
-// 流程①②③（全局配置/初始化/ignore）未完成时左侧栏整体置灰禁点，正常不会走到本门槛；
-// 此处仅作安全兜底。④ 远端+首推为可选环节：不配置不锁定任何功能，
+// 流程①②③（全局配置/初始化/ignore）未完成时左侧栏整体置灰禁点（LeftLocked），
+// ④ 远端+首推为可选环节：不配置不锁定任何功能，
 // 仅在用到远端相关操作时由 NeedRemote() 弹窗提示配置。
-static bool FlowAllowed(int id) {
-    switch (id) {
-    // 只读查看类
-    case IDM_STATUS: case IDM_DIFF: case IDM_LOG_ALL: case IDM_SHOW:
-    case IDM_REMOTE_INFO: case IDM_TAG_LIST:
-    // 导航与恢复类（防死锁）
-    case IDM_BRANCH_SW: case IDM_BACK_MAIN: case IDM_CHECKOUT_REF:
-    case IDM_STASH: case IDM_STASH_POP:
-    // 完成首推所需（含全新仓库配置远端：卡红时必须能点【配置远程】，否则死锁）
-    case IDM_COMMIT: case IDM_PUSH: case IDM_PULL: case IDM_REMOTE_ADD:
-        return true;
-    }
-    return false;
-}
-static void FlowGate(void (*fn)(), const wchar_t* name, int id) {
-    if (g_flowBlock != -1 && !FlowAllowed(id)) {   // 仅①②③阶段的兜底（④可选不锁定）；正常流程下左栏禁点后走不到这里
-        if (g_lastSkip != name) {
-            g_lastSkip = name;
-            OutTxt(L"流程未完成：先在左侧完成流程卡红色环节，【" + std::wstring(name) + L"】等后续操作暂被锁定。");
-        }
-        return;
-    }
-    fn();
-}
 
 // ============================ UI 构建 =======================================
 static HWND MkBtn(HWND parent, const wchar_t* text, int id, int x, int y, int w, int h, HFONT f, bool flat = false) {
@@ -1975,7 +1951,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             for (auto& cat : MENU)
                 for (auto& item : cat.items)
                     if (item.id == id) {
-                        FlowGate(item.fn, item.name, id);
+                        item.fn();
                         return 0;
                     }
         }
