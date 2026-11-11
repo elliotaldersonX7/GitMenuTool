@@ -856,6 +856,94 @@ static std::optional<std::wstring> AskText(HWND parent, const wchar_t* title, co
     SetActiveWindow(parent);
     return state.result;
 }
+// 双输入弹窗：OK 返回两个文本（各自可留空），取消返回 nullopt（用于同窗填写 name/email 等成对项）
+struct Ask2State {
+    HWND hEdit1 = nullptr, hEdit2 = nullptr;
+    std::optional<std::pair<std::wstring, std::wstring>> result;
+    bool done = false;
+};
+static LRESULT CALLBACK Ask2DlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
+    Ask2State* st = (Ask2State*)data;
+    switch (m) {
+    case WM_COMMAND: {
+        int id = LOWORD(w);
+        if (id == IDOK || id == IDCANCEL) {
+            if (id == IDOK && st->hEdit1 && st->hEdit2) {
+                auto get = [](HWND e) {
+                    int len = GetWindowTextLengthW(e);
+                    std::wstring s(len, L'\0');
+                    GetWindowTextW(e, &s[0], len + 1);
+                    return Trim(s);
+                };
+                st->result = std::make_pair(get(st->hEdit1), get(st->hEdit2));
+            } else {
+                st->result = std::nullopt;
+            }
+            st->done = true;
+            DestroyWindow(h);
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        st->done = true;
+        st->result = std::nullopt;
+        DestroyWindow(h);
+        return 0;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+static std::optional<std::pair<std::wstring, std::wstring>> AskText2(HWND parent, const wchar_t* title,
+    const std::wstring& label1, const std::wstring& def1,
+    const std::wstring& label2, const std::wstring& def2) {
+    int m = (int)(14 * g_scale), bw = (int)(80 * g_scale);
+    int lblH = (int)(24 * g_scale) + (int)(6 * g_scale);
+    int editH = (int)(24 * g_scale), btnH = (int)(28 * g_scale), gap = (int)(16 * g_scale);
+    // 客户区高度按两行"标签+输入框"反推，再用 AdjustWindowRectEx 补上标题栏/边框
+    int ch = m + lblH + (int)(6 * g_scale) + editH + gap + lblH + (int)(6 * g_scale) + editH
+           + (int)(16 * g_scale) + btnH + m;
+    RECT rcFrame = { 0, 0, (int)(470 * g_scale), ch };
+    AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    int w = rcFrame.right - rcFrame.left, h = rcFrame.bottom - rcFrame.top;
+    RECT pr; GetWindowRect(parent, &pr);
+    int x = pr.left + ((pr.right - pr.left) - w) / 2, y = pr.top + ((pr.bottom - pr.top) - h) / 2;
+    if (x < 0) x = 0; if (y < 0) y = 0;
+    Ask2State state;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", title,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, w, h, parent, nullptr, g_hInst, nullptr);
+    SetWindowSubclass(dlg, Ask2DlgSub, 1, (DWORD_PTR)&state);
+    HWND hLabel1 = CreateWindowExW(0, L"STATIC", label1.c_str(), WS_CHILD | WS_VISIBLE,
+        m, m, w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
+    state.hEdit1 = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", def1.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        m, m + lblH + (int)(6 * g_scale), w - 2 * m, editH, dlg, (HMENU)100, g_hInst, nullptr);
+    int y2 = m + lblH + (int)(6 * g_scale) + editH + gap;
+    HWND hLabel2 = CreateWindowExW(0, L"STATIC", label2.c_str(), WS_CHILD | WS_VISIBLE,
+        m, y2, w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
+    state.hEdit2 = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", def2.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        m, y2 + lblH + (int)(6 * g_scale), w - 2 * m, editH, dlg, (HMENU)101, g_hInst, nullptr);
+    HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        w - 2 * bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
+    HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        w - bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
+    SendMessageW(hLabel1, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(state.hEdit1, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hLabel2, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(state.hEdit2, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hOk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hCancel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    EnableWindow(parent, FALSE);
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(state.hEdit1);
+    MSG msg;
+    while (!state.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        // 回车→默认按钮(IDOK)、Esc→IDCANCEL、Tab 焦点切换，全由 IsDialogMessageW 标准转换
+        if (IsDialogMessageW(dlg, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    EnableWindow(parent, TRUE);
+    SetActiveWindow(parent);
+    return state.result;
+}
 // 目录选择对话框
 static std::optional<std::wstring> BrowseFolder(HWND parent, const wchar_t* title) {
     BROWSEINFOW bi = { parent, nullptr, nullptr, title, BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE };
@@ -1278,15 +1366,14 @@ static void OpAbortMerge() {
     Exec({ G({ L"merge", L"--abort" }) });
 }
 static void OpGlobalCfg() {
-    auto name = AskText(g_main, L"修改全局配置", L"全局 user.name（提交署名，对所有仓库生效）:",
-                        Trim(GitOut({ L"config", L"--global", L"user.name" })));
-    if (!name) return;
-    auto email = AskText(g_main, L"修改全局配置", L"全局 user.email（提交邮箱）:",
-                         Trim(GitOut({ L"config", L"--global", L"user.email" })));
-    if (!email) return;
+    // 单弹窗同窗填写 name 与 email，免去两次输入
+    auto r = AskText2(g_main, L"修改全局配置",
+        L"全局 user.name（提交署名，对所有仓库生效）:", Trim(GitOut({ L"config", L"--global", L"user.name" })),
+        L"全局 user.email（提交邮箱）:",              Trim(GitOut({ L"config", L"--global", L"user.email" })));
+    if (!r) return;
     std::vector<std::vector<std::wstring>> cmds;
-    if (!name->empty())   cmds.push_back(G({ L"config", L"--global", L"user.name", *name }));
-    if (!email->empty())  cmds.push_back(G({ L"config", L"--global", L"user.email", *email }));
+    if (!r->first.empty())  cmds.push_back(G({ L"config", L"--global", L"user.name",  r->first }));
+    if (!r->second.empty()) cmds.push_back(G({ L"config", L"--global", L"user.email", r->second }));
     if (cmds.empty()) return;
     cmds.push_back(G({ L"config", L"--global", L"--list" }));
     ExecV(cmds);
