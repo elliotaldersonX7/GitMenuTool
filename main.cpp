@@ -1172,6 +1172,29 @@ static void OpPush() {
     if (!up.empty()) { Exec({ G({ L"push" }) }); return; }
     DoPushCore(false);
 }
+/**
+  ******************************************************************************
+  * @brief    强制推送当前分支，用本地历史整体覆盖远端同源分支
+  * @param    None
+  * @retval   None
+  * @note     危险操作：远端上本地没有的提交将被丢弃且无法恢复；
+  *           需在弹窗输入大写 Y 确认，其他输入或取消均不执行
+  ******************************************************************************
+  */
+static void OpForcePush() {
+    if (!EnsureRepo() || NeedRemote()) return;
+    std::wstring br = CurBranch();
+    std::wstring note = L"强制推送会用本地 " + br + L" 历史整体覆盖远端：\n"
+                        L"· 远端上本地没有的提交将被丢弃（无法恢复）\n"
+                        L"· 若他人基于远端旧历史工作，之后推送会产生冲突\n\n"
+                        L"确认强推请输入大写 Y（其他输入或留空=取消）：";
+    auto y = AskText(g_main, L"强制推送（危险操作）", note);
+    if (!y || *y != L"Y") return;
+    OutSep(); OutCmd(L"强制推送: " + br);
+    std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
+    if (!up.empty()) Exec({ G({ L"push", L"--force" }) });
+    else             Exec({ G({ L"push", L"-u", g_remote, br, L"--force" }) });
+}
 static void OpInitRepo() {
     if (!EnsureRepo()) return;
     if (Trim(GitOut({ L"rev-parse", L"--is-inside-work-tree" })) == L"true") { Info(g_main, L"该目录已经是 git 仓库，无需初始化。"); return; }
@@ -1449,7 +1472,7 @@ static void OpResetGit() {
 // ============================ 左侧菜单表 ====================================
 enum {
     IDM_REMOTE_ADD = IDM_BASE, IDM_REMOTE_URL, IDM_REMOTE_RENAME, IDM_REMOTE_LS,
-    IDM_CLONE, IDM_STATUS, IDM_DIFF, IDM_COMMIT, IDM_PUSH, IDM_PULL, IDM_LOG_ALL, IDM_SHOW, IDM_REMOTE_INFO,
+    IDM_CLONE, IDM_STATUS, IDM_DIFF, IDM_COMMIT, IDM_PUSH, IDM_FORCE_PUSH, IDM_PULL, IDM_LOG_ALL, IDM_SHOW, IDM_REMOTE_INFO,
     IDM_TAG_LIST, IDM_TAG_NEW, IDM_TAG_PUSH, IDM_TAG_DEL,
     IDM_BRANCH_SW, IDM_BRANCH_NEW, IDM_BRANCH_MERGE, IDM_BRANCH_DEL, IDM_CHECKOUT_REF, IDM_BACK_MAIN, IDM_STASH, IDM_STASH_POP,
     IDM_RESTORE_STAGED, IDM_RESTORE_FILE, IDM_DISCARD_ALL, IDM_UNDO_LAST, IDM_AMEND, IDM_REVERT,
@@ -1470,6 +1493,7 @@ static const MenuCat MENU[] = {
         { IDM_DIFF,         L"查看改动",   OpDiff },
         { IDM_COMMIT,       L"提交修改",   OpCommit },
         { IDM_PUSH,         L"推送(commit)", OpPush },
+        { IDM_FORCE_PUSH,   L"强制推送",    OpForcePush },
         { IDM_PULL,         L"拉取",       OpPull },
         { IDM_LOG_ALL,      L"查看历史(全量)", OpLogAll },
         { IDM_SHOW,         L"查看某次提交", OpShow },
