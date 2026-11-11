@@ -2,3 +2,5 @@ GitMenuTool.exe
 *.obj
 last_dir.txt
 test_repo/
+*.bmp
+*.png
