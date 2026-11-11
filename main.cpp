@@ -130,7 +130,7 @@ static std::wstring g_git, g_repo, g_remote, g_statUrl;
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
 static bool g_pushAfterRemoteChange = false;   // 更换远端后自动强制首推
-static int g_flowBlock = -1;              // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；3=④远端+首推：白名单放行；-1=全部完成）
+static int g_flowBlock = -1;              // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；-1=流程完成。④远端+首推为可选环节，不产生卡点）
 static std::wstring g_lastSkip;           // 同一卡点只提示一次
 static int g_leftScroll = 0, g_leftTotalH = 0;
 
@@ -1003,11 +1003,12 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     bool s0 = !Trim(GitOut({ L"config", L"--global", L"user.name" })).empty()
            && !Trim(GitOut({ L"config", L"--global", L"user.email" })).empty();
     bool inRepo = Trim(GitOut({ L"rev-parse", L"--is-inside-work-tree" })) == L"true";
-    // 流程行四环节：①全局配置 ②初始化仓库 ③配置ignore ④远端+首推
-    struct PillS { const wchar_t* name; bool ok; };
+    // 流程行四环节：①全局配置 ②初始化仓库 ③配置ignore ④远端+首推（可选，不强制）
+    struct PillS { const wchar_t* name; bool ok; bool optional; };
     if (!s0 || !inRepo) {
         g_flowBlock = !s0 ? 0 : 1;   // ①②未完成：左侧栏整体置灰禁点（全局配置/初始化均可在顶栏完成）
-        PillS pills[4] = { { L"① 全局配置", s0 }, { L"② 初始化仓库", inRepo }, { L"③ 配置ignore", false }, { L"④ 远端+首推", false } };
+        PillS pills[4] = { { L"① 全局配置", s0, false }, { L"② 初始化仓库", inRepo, false },
+                           { L"③ 配置ignore", false, false }, { L"④ 远端+首推(可选)", false, true } };
         std::vector<Seg> flow = { SegT(L"流程：", STAT_TXT, true) };
         bool blockedMarked = false;
         for (auto& p : pills) {
@@ -1030,13 +1031,15 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     s2 = fs::exists(gi, ec) && fs::file_size(gi, ec) > 0;
     std::wstring upstream = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     s3 = !g_remote.empty() && !upstream.empty();
-    g_flowBlock = !s2 ? 2 : (!s3 ? 3 : -1);   // ③未完成锁全部；④未完成按白名单放行（强制，不可跳过）
+    g_flowBlock = !s2 ? 2 : -1;   // ③未完成锁左栏；④远端+首推为可选，不配置也解锁（用到远端功能时 NeedRemote 提示）
     // 流程行
     std::vector<Seg> flow = { SegT(L"流程：", STAT_TXT, true) };
-    PillS pills[4] = { { L"① 全局配置", true }, { L"② 初始化仓库", true }, { L"③ 配置ignore", s2 }, { L"④ 远端+首推", s3 } };
+    PillS pills[4] = { { L"① 全局配置", true, false }, { L"② 初始化仓库", true, false },
+                       { L"③ 配置ignore", s2, false }, { L"④ 远端+首推(可选)", s3, true } };
     bool blockedMarked = false;
     for (auto& p : pills) {
         if (p.ok) flow.push_back(SegT(L" " + std::wstring(p.name) + L" ✔ ", STAT_GRN, false, BG_GRN));
+        else if (p.optional) flow.push_back(SegT(L" " + std::wstring(p.name) + L" · ", STAT_DIM, false, BG_GRY));
         else if (!blockedMarked) { blockedMarked = true; flow.push_back(SegT(L" " + std::wstring(p.name) + L" ✖ ", STAT_RED, false, BG_RED)); }
         else flow.push_back(SegT(L" " + std::wstring(p.name) + L" · ", STAT_DIM, false, BG_GRY));
     }
@@ -1625,10 +1628,9 @@ static void PickDir() {
 }
 
 // ============================ 流程卡锁定 ====================================
-// 流程④（远端+首推）未完成时锁定破坏类按钮；以下三类豁免：
-// ① 只读查看类（无害且便于诊断）② 导航/恢复类（防流程锁死：新建分支后必须能切回/能 stash）
-// ③ 完成首推所需（配置远端/提交/推送后 ④ 变绿，其余按钮自动解锁）
-// 注：流程①②③（全局配置/初始化/ignore）未完成时左侧栏整体置灰禁点，不走本门槛
+// 流程①②③（全局配置/初始化/ignore）未完成时左侧栏整体置灰禁点，正常不会走到本门槛；
+// 此处仅作安全兜底。④ 远端+首推为可选环节：不配置不锁定任何功能，
+// 仅在用到远端相关操作时由 NeedRemote() 弹窗提示配置。
 static bool FlowAllowed(int id) {
     switch (id) {
     // 只读查看类
@@ -1644,7 +1646,7 @@ static bool FlowAllowed(int id) {
     return false;
 }
 static void FlowGate(void (*fn)(), const wchar_t* name, int id) {
-    if (g_flowBlock != -1 && !FlowAllowed(id)) {   // 流程④未完成：锁定（只读与首推所需除外；①②③未完成时左栏本身禁点）
+    if (g_flowBlock != -1 && !FlowAllowed(id)) {   // 仅①②③阶段的兜底（④可选不锁定）；正常流程下左栏禁点后走不到这里
         if (g_lastSkip != name) {
             g_lastSkip = name;
             OutTxt(L"流程未完成：先在左侧完成流程卡红色环节，【" + std::wstring(name) + L"】等后续操作暂被锁定。");
