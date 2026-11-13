@@ -56,8 +56,8 @@ namespace fs = std::filesystem;
 // ============================ 全局 ==========================================
 static const wchar_t APP_TITLE[] = L"Git 菜单工具 cpp v1";
 static const wchar_t GITEA_HINT[] = L"https://github.com/仓库名.git";
-static const wchar_t PRETTY[] = L"format:%C(yellow)%h%C(reset) %C(cyan)%ad%C(reset)%C(auto)%d%C(reset) %s";
-static const wchar_t DATEFMT[] = L"format:%m-%d %H:%M";
+static const wchar_t PRETTY[] = L"format:%h %ad%d %s";
+static const wchar_t DATEFMT[] = L"format:%Y-%m-%d %H:%M";
 // 内置 .gitignore 模板（Keil 固件项目通用规则）
 static const wchar_t* GITIGNORE_TEMPLATE =
 LR"(# ===== Keil MDK 编译产物 =====
@@ -73,7 +73,6 @@ LR"(# ===== Keil MDK 编译产物 =====
 *.htm
 *.lnp
 *.dep
-*.sct
 *.iex
 *.scvd
 # 编译输出目录
@@ -88,6 +87,7 @@ LR"(# ===== Keil MDK 编译产物 =====
 *.uvoptx
 *.bak
 *.bak_*
+JLinkSettings.ini
 JLinkLog.txt
 # ===== AI 工具本地配置 =====
 .claude/
@@ -98,6 +98,25 @@ Thumbs.db
 # ===== Python 缓存 =====
 __pycache__/
 *.pyc
+# ===== tools 目录：只忽略脚本与环境（exe 保留）=====
+**/tools/*.py
+**/tools/*.spec
+**/tools/*.ps1
+**/tools/*.txt
+**/tools/.venv*/
+# ===== Office/PDF 文档（按需增删）=====
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+*.pdf
+# ===== 压缩包/比对快照 =====
+*.zip
+*.rar
+*.7z
+*.schemeB
 # ===== 其它常见构建目录（按需增删）=====
 dist/
 .venv*/
@@ -108,14 +127,20 @@ node_modules/
 struct GiOpt { const wchar_t* title; bool dft; const wchar_t* rules; };
 static const GiOpt GI_OPTIONS[] = {
     { L"Keil MDK 编译产物与输出目录", true,
-      L"# ===== Keil MDK 编译产物 =====\r\n*.o\r\n*.d\r\n*.crf\r\n*.axf\r\n*.bin\r\n*.hex\r\n*.elf\r\n*.map\r\n*.lst\r\n*.htm\r\n*.lnp\r\n*.dep\r\n*.sct\r\n*.iex\r\n*.scvd\r\n# 编译输出目录\r\n**/mdk/output/\r\n**/Objects/\r\n**/Listings/\r\n**/build/\r\n**/DebugConfig/\r\n**/RTE/_*/" },
+      L"# ===== Keil MDK 编译产物 =====\r\n*.o\r\n*.d\r\n*.crf\r\n*.axf\r\n*.bin\r\n*.hex\r\n*.elf\r\n*.map\r\n*.lst\r\n*.htm\r\n*.lnp\r\n*.dep\r\n*.iex\r\n*.scvd\r\n# 编译输出目录\r\n**/mdk/output/\r\n**/Objects/\r\n**/Listings/\r\n**/build/\r\n**/DebugConfig/\r\n**/RTE/_*/" },
     { L"Keil 个人配置/临时文件（uvprojx 工程文件保留）", true,
-      L"# ===== Keil 用户态/临时（每人不同，uvprojx 保留）=====\r\n*.uvguix.*\r\n*.uvoptx\r\n*.bak\r\n*.bak_*" },
+      L"# ===== Keil 用户态/临时（每人不同，uvprojx 保留）=====\r\n*.uvguix.*\r\n*.uvoptx\r\n*.bak\r\n*.bak_*\r\nJLinkSettings.ini" },
     { L"JLink 调试日志", true, L"JLinkLog.txt" },
     { L"AI 工具本地配置（.claude/ 等）", true, L"# ===== AI 工具本地配置 =====\r\n.claude/" },
     { L"系统/编辑器临时文件", true, L"# ===== 系统/编辑器 =====\r\n.DS_Store\r\nThumbs.db\r\n*.swp" },
-    { L"Python 缓存/虚拟环境", false, L"# ===== Python 缓存 =====\r\n__pycache__/\r\n*.pyc\r\n.venv*/\r\nvenv/" },
-    { L"前端/其它构建目录（dist、node_modules）", false, L"# ===== 其它常见构建目录 =====\r\ndist/\r\nnode_modules/" },
+    { L"Python 缓存/虚拟环境", true, L"# ===== Python 缓存 =====\r\n__pycache__/\r\n*.pyc\r\n.venv*/\r\nvenv/" },
+    { L"tools 目录：忽略 py/spec/ps1/txt 与 .venv（exe 保留）", true,
+      L"# ===== tools 目录：只忽略脚本与环境（exe 保留）=====\r\n**/tools/*.py\r\n**/tools/*.spec\r\n**/tools/*.ps1\r\n**/tools/*.txt\r\n**/tools/.venv*/" },
+    { L"Office/PDF 文档（doc/docx/xls/xlsx/ppt/pptx/pdf）", true,
+      L"# ===== Office/PDF 文档 =====\r\n*.doc\r\n*.docx\r\n*.xls\r\n*.xlsx\r\n*.ppt\r\n*.pptx\r\n*.pdf" },
+    { L"前端/其它构建目录（dist、node_modules）", true, L"# ===== 其它常见构建目录 =====\r\ndist/\r\nnode_modules/" },
+    { L"压缩包/比对快照（zip/rar/7z、*.schemeB）", true,
+      L"# ===== 压缩包/比对快照 =====\r\n*.zip\r\n*.rar\r\n*.7z\r\n*.schemeB" },
 };
 
 static HINSTANCE g_hInst = nullptr;
@@ -293,8 +318,8 @@ static GitResult RunGit(const std::vector<std::wstring>& argv, const std::wstrin
 }
 // 快速取 git 输出（状态探测/前置检查；失败返回空串）
 static std::wstring GitOut(const std::vector<std::wstring>& args, DWORD timeoutMs = 10000) {
-    if (g_repo.empty()) return L"";
-    std::vector<std::wstring> argv = { g_git, L"-C", g_repo };
+    std::vector<std::wstring> argv = { g_git };
+    if (!g_repo.empty()) { argv.push_back(L"-C"); argv.push_back(g_repo); }   // 全局命令（如 config --global）不依赖仓库，未选目录也能执行
     for (auto& a : args) argv.push_back(a);
     GitResult r = RunGit(argv, L"", timeoutMs);
     return r.rc == 0 ? r.out : L"";
@@ -581,9 +606,20 @@ static void OutScrollTo(HWND h, int pos) {
 static void LogAppend(const std::vector<Seg>& segs) {
     LogLine ln;
     for (auto& s : segs) ln.segs.push_back({ s.text, s.color });
+    // 贴底跟随：追加前视图已在底部附近时，新内容后自动滚到底；用户往上翻了则保持位置
+    bool follow = false;
+    if (g_out) {
+        RECT rc; GetClientRect(g_out, &rc);
+        follow = (g_logScroll + (rc.bottom - rc.top)) >= g_logTotalH - LogLineH();
+    }
     g_log.push_back(std::move(ln));
     if (g_out) {
         UpdateOutScroll(g_out);
+        RECT rc; GetClientRect(g_out, &rc);
+        int maxScroll = g_logTotalH - (rc.bottom - rc.top);
+        if (maxScroll < 0) maxScroll = 0;
+        if (follow) g_logScroll = maxScroll;
+        SetScrollPos(g_out, SB_VERT, g_logScroll, TRUE);
         InvalidateRect(g_out, nullptr, FALSE);
     }
 }
@@ -653,7 +689,11 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             case SB_LINEDOWN: pos += lh; break;
             case SB_PAGEUP: pos -= (int)(120 * g_scale); break;
             case SB_PAGEDOWN: pos += (int)(120 * g_scale); break;
-            case SB_THUMBTRACK: pos = HIWORD(w); break;
+            case SB_THUMBTRACK: {
+                SCROLLINFO ti = { sizeof(ti), SIF_TRACKPOS, 0, 0, 0, 0 };
+                pos = GetScrollInfo(h, SB_VERT, &ti) ? ti.nTrackPos : HIWORD(w);
+                break;
+            }
         }
         OutScrollTo(h, pos);
         return 0;
@@ -715,6 +755,14 @@ static void ExecAsync(std::vector<JobCmd> cmds) {
                 PostMessageW(g_main, WM_APP_JOBMSG, (WPARAM)om, 0);
             }
             if (r.rc != 0 && !c.optional) {
+                // 认证失败单独提示：多半是凭据管理器里缓存的远端凭据失效，新手最易懵
+                if (r.out.find(L"Authentication failed") != std::wstring::npos
+                    || r.out.find(L"Failed to authenticate") != std::wstring::npos
+                    || r.out.find(L"401") != std::wstring::npos) {
+                    JobMsg* am = new JobMsg{ 2, L"凭据被拒：Windows 缓存的远端账号可能已失效。可先重试一次（有时凭据会自动刷新）；"
+                                             L"若反复失败，请到 控制面板→用户账户→凭据管理器→普通凭据，删除该地址的 git:http://… 条目后重试，会重新弹窗输入账号密码。" };
+                    PostMessageW(g_main, WM_APP_JOBMSG, (WPARAM)am, 0);
+                }
                 JobMsg* em = new JobMsg{ 2, Fmt(L"[退出码 %d] 出错，已中止后续步骤。", r.rc) };
                 PostMessageW(g_main, WM_APP_JOBMSG, (WPARAM)em, 0);
                 break;
@@ -734,6 +782,7 @@ static void ExecV(std::vector<std::vector<std::wstring>> cmds) {
     ExecAsync(std::move(v));
 }
 // SPECIAL：init（一键初始化）/ back_main（回主分支）
+static std::string WideToUtf8(const std::wstring& w);   // 定义在下方，init 自动提交要用
 static void HandleSpecial(const std::vector<std::wstring>& argv) {
     const std::wstring kind = argv[1];
     if (kind == L"init") {
@@ -748,8 +797,8 @@ static void HandleSpecial(const std::vector<std::wstring>& argv) {
                 return;
             }
         }
-        JobMsg* m = new JobMsg{ 1, L"初始化完成（未提交）。下一步按流程卡：② 一键配置ignore 生成忽略规则，"
-                                   L"再【提交修改】完成首次提交，最后【配置远程】配好远端地址，用【推送(commit)】完成首推。" };
+        JobMsg* m = new JobMsg{ 1, L"初始化完成（未提交）。下一步按流程卡：③ 点【一键配置ignore】生成忽略规则，"
+                                   L"完成后自动执行④首次提交（消息统一为 chore: 初始化仓库），最后【配置远程】配好远端地址，用【推送(commit)】完成首推。" };
         PostMessageW(g_main, WM_APP_JOBMSG, (WPARAM)m, 0);
     } else if (kind == L"back_main") {
         bool done = false;
@@ -942,16 +991,37 @@ static std::optional<std::pair<std::wstring, std::wstring>> AskText2(HWND parent
     SetActiveWindow(parent);
     return state.result;
 }
-// 目录选择对话框
+// 目录选择对话框（IFileDialog：窗口可拉伸、系统记住尺寸，深目录友好；Vista+，本机 Win7 SP1 满足）
+static std::wstring LoadLastDir();   // 前置声明，定义在下方
 static std::optional<std::wstring> BrowseFolder(HWND parent, const wchar_t* title) {
-    BROWSEINFOW bi = { parent, nullptr, nullptr, title, BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE };
-    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-    if (!pidl) return std::nullopt;
-    wchar_t path[MAX_PATH] = L"";
-    bool ok = SHGetPathFromIDListW(pidl, path) != FALSE;
-    CoTaskMemFree(pidl);
-    if (!ok || !path[0]) return std::nullopt;
-    return std::wstring(path);
+    IFileDialog* fd = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&fd));
+    if (FAILED(hr)) return std::nullopt;
+    std::optional<std::wstring> result;
+    fd->SetTitle(title);
+    DWORD opts = 0;
+    if (SUCCEEDED(fd->GetOptions(&opts))) fd->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+    std::wstring last = LoadLastDir();
+    if (!last.empty()) {
+        IShellItem* psi = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(last.c_str(), nullptr, IID_PPV_ARGS(&psi)))) {
+            fd->SetDefaultFolder(psi);   // 默认定位到上次使用的目录
+            psi->Release();
+        }
+    }
+    if (SUCCEEDED(fd->Show(parent))) {
+        IShellItem* psi = nullptr;
+        if (SUCCEEDED(fd->GetResult(&psi))) {
+            PWSTR p = nullptr;
+            if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &p))) {
+                result = p;
+                CoTaskMemFree(p);
+            }
+            psi->Release();
+        }
+    }
+    fd->Release();
+    return result;
 }
 // 文件选择对话框
 static std::wstring OpenFileDialog(HWND parent, const wchar_t* title, const wchar_t* filter) {
@@ -1005,8 +1075,9 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     struct PillS { const wchar_t* name; bool ok; bool optional; };
     if (!s0 || !inRepo) {
         g_flowBlock = !s0 ? 0 : 1;   // ①②未完成：左侧栏整体置灰禁点（全局配置/初始化均可在顶栏完成）
-        PillS pills[4] = { { L"① 全局配置", s0, false }, { L"② 初始化仓库", inRepo, false },
-                           { L"③ 配置ignore", false, false }, { L"④ 远端+首推(可选)", false, true } };
+        PillS pills[5] = { { L"① 全局配置", s0, false }, { L"② 初始化仓库", inRepo, false },
+                           { L"③ 配置ignore", false, false }, { L"④ 首次提交", false, false },
+                           { L"⑤ 远端+首推(可选)", false, true } };
         std::vector<Seg> flow = { SegT(L"流程：", STAT_TXT, true) };
         bool blockedMarked = false;
         for (auto& p : pills) {
@@ -1022,18 +1093,20 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     g_remote = DetectRemote();
     std::wstring branch = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"HEAD" }));
     if (branch.empty()) branch = L"（空）";
-    // ③④ 环节状态
-    bool s2 = false, s3 = false;
+    // ③④⑤ 环节状态
+    bool s2 = false, s3 = false, s4 = false;
     std::error_code ec;
     fs::path gi = fs::path(g_repo) / L".gitignore";
     s2 = fs::exists(gi, ec) && fs::file_size(gi, ec) > 0;
+    s4 = !Trim(GitOut({ L"rev-parse", L"-q", L"--verify", L"HEAD" })).empty();   // ④ 首次提交：仓库里已有提交即完成
     std::wstring upstream = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     s3 = !g_remote.empty() && !upstream.empty();
-    g_flowBlock = !s2 ? 2 : -1;   // ③未完成锁左栏；④远端+首推为可选，不配置也解锁（用到远端功能时 NeedRemote 提示）
+    g_flowBlock = !s2 ? 2 : -1;   // ③未完成锁左栏；④首次提交在③完成后自动执行；⑤远端+首推为可选，不配置也解锁
     // 流程行
     std::vector<Seg> flow = { SegT(L"流程：", STAT_TXT, true) };
-    PillS pills[4] = { { L"① 全局配置", true, false }, { L"② 初始化仓库", true, false },
-                       { L"③ 配置ignore", s2, false }, { L"④ 远端+首推(可选)", s3, true } };
+    PillS pills[5] = { { L"① 全局配置", true, false }, { L"② 初始化仓库", true, false },
+                       { L"③ 配置ignore", s2, false }, { L"④ 首次提交", s4, false },
+                       { L"⑤ 远端+首推(可选)", s3, true } };
     bool blockedMarked = false;
     for (auto& p : pills) {
         if (p.ok) flow.push_back(SegT(L" " + std::wstring(p.name) + L" ✔ ", STAT_GRN, false, BG_GRN));
@@ -1151,7 +1224,7 @@ static void OpCommit() {
     Exec({ G({ L"add", L"-A" }), G({ L"commit", L"-m", *msg }) });
 }
 static void OpLogAll() {
-    Exec({ G({ L"--no-pager", L"log", L"--all", L"--pretty=" + std::wstring(PRETTY), L"--date=" + std::wstring(DATEFMT) }) });
+    Exec({ G({ L"--no-pager", L"log", L"--all", L"--abbrev=10", L"--pretty=" + std::wstring(PRETTY), L"--date=" + std::wstring(DATEFMT) }) });
 }
 static void OpShow() {
     if (!EnsureRepo()) return;
@@ -1241,7 +1314,10 @@ static void OpRemoteAdd() {
             rn = *pick;
         }
     }
-    auto url = AskText(g_main, L"配置远程", L"远程仓库地址:", GITEA_HINT);
+    // 地址默认值：已配远端时预填当前地址，未配置远端则为空
+    std::wstring curRemote = rn.empty() ? g_remote : rn;
+    std::wstring urlDef = curRemote.empty() ? L"" : Trim(GitOut({ L"config", L"--get", L"remote." + curRemote + L".url" }));
+    auto url = AskText(g_main, L"配置远程", L"远程仓库地址:", urlDef);
     if (!url || url->empty()) return;
     if (rn.empty() && rems.size() == 1) rn = rems[0];   // 单远端：直接修改其地址
     std::vector<std::vector<std::wstring>> cmds;
@@ -1471,18 +1547,23 @@ static void OpResetGit() {
     std::error_code ec;
     if (!fs::is_directory(gitdir, ec)) { Info(g_main, L"该目录还没有 Git 历史，无需清空。"); return; }
     if (g_busy) { Info(g_main, L"有操作正在运行，请等它完成后再清空。"); return; }
-    std::wstring note = L"【危险】将删除该目录的 .git：\n"
+    std::wstring note = L"【危险】将删除该目录的 .git 与 .gitignore：\n"
                         L"· 全部提交历史消失（含未推送的提交，reflog 也救不回）\n"
                         L"· 远端配置、分支、标签全部消失\n"
-                        L"· 目录里的代码/文档文件全部保留\n";
+                        L"· 目录里的代码/文档文件全部保留\n"
+                        L"· .gitignore 一并删除（重走流程③时按默认规则重新生成）\n";
     if (!g_remote.empty()) note += L"· 该仓库曾推送过远端：清空后重推必须强制覆盖远端旧历史\n";
     note += L"\n确认清空请输入大写 Y（其他输入或留空=取消）：";
     auto y = AskText(g_main, L"清空Git重来（危险操作）", note.c_str());
     if (!y || *y != L"Y") return;
     fs::remove_all(gitdir, ec);
     if (ec) { Warn(g_main, std::wstring(L"删除 .git 失败：\n") + GbkToWide(ec.message())); return; }
+    fs::path gi = fs::path(g_repo) / L".gitignore";
+    bool hadGi = fs::exists(gi, ec);
+    fs::remove(gi, ec);
     g_remote.clear();
     OutSep(); OutTxt(L"已清空 Git 历史（.git 已删除），所有文件保留未动。");
+    if (hadGi) OutTxt(L"旧 .gitignore 也已一并删除；重走流程③【一键配置ignore】时会重新生成。");
     OutTxt(L"需要重来可点【✚ 初始化仓库】。");
     RefreshStatusAsync();
 }
@@ -1502,8 +1583,8 @@ static const MenuCat MENU[] = {
         { IDM_REMOTE_ADD,    L"配置远程",         OpRemoteAdd },
         { IDM_REMOTE_RENAME, L"远端改名(本地别名)", OpRemoteRename },
     } },
+    // 克隆仓库已移到顶栏（IDM_CLONE 显式分发），左侧不再显示
     { L"日常", {
-        { IDM_CLONE,        L"克隆仓库",   OpClone },
         { IDM_STATUS,       L"查看状态",   OpStatus },
         { IDM_DIFF,         L"查看改动",   OpDiff },
         { IDM_COMMIT,       L"提交修改",   OpCommit },
@@ -1548,25 +1629,144 @@ static const MenuCat MENU[] = {
     } },
 };
 
+// ============================ ignore 勾选弹窗 ===============================
+// 勾选弹窗状态：复选框句柄表 + 结果（OK 时逐项回填 checked，取消只置 done）
+struct GiCheckState {
+    std::vector<HWND> hCbs;
+    std::vector<bool> checked;
+    bool done = false, ok = false;
+};
+static LRESULT CALLBACK GiCheckDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
+    GiCheckState* st = (GiCheckState*)data;
+    switch (m) {
+    case WM_COMMAND: {
+        int id = LOWORD(w);
+        if (id == IDOK || id == IDCANCEL) {
+            if (id == IDOK) {
+                for (size_t i = 0; i < st->hCbs.size(); ++i)
+                    st->checked[i] = SendMessageW(st->hCbs[i], BM_GETCHECK, 0, 0) == BST_CHECKED;
+                st->ok = true;
+            }
+            st->done = true;
+            DestroyWindow(h);
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        st->done = true;
+        st->ok = false;
+        DestroyWindow(h);
+        return 0;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+// ignore 规则勾选弹窗：按 GI_OPTIONS 逐项生成复选框（默认勾选取 dft），OK 返回各项勾选态，取消返回 nullopt
+static std::optional<std::vector<bool>> AskGiChecks(HWND parent, const wchar_t* title) {
+    int n = (int)(sizeof(GI_OPTIONS) / sizeof(GI_OPTIONS[0]));
+    int m = (int)(14 * g_scale), bw = (int)(80 * g_scale);
+    int lblH = (int)(24 * g_scale);
+    int cbH = (int)(28 * g_scale), cbGap = (int)(4 * g_scale);
+    int btnH = (int)(28 * g_scale);
+    int w = (int)(470 * g_scale);
+    int ch = m + lblH + (int)(6 * g_scale) + n * cbH + (n - 1) * cbGap
+           + (int)(16 * g_scale) + btnH + m;
+    RECT rcFrame = { 0, 0, w, ch };
+    AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    int ww = rcFrame.right - rcFrame.left, wh = rcFrame.bottom - rcFrame.top;
+    RECT pr; GetWindowRect(parent, &pr);
+    int x = pr.left + ((pr.right - pr.left) - ww) / 2, y = pr.top + ((pr.bottom - pr.top) - wh) / 2;
+    if (x < 0) x = 0; if (y < 0) y = 0;
+    GiCheckState state;
+    state.checked.assign(n, false);
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", title,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, parent, nullptr, g_hInst, nullptr);
+    SetWindowSubclass(dlg, GiCheckDlgSub, 1, (DWORD_PTR)&state);
+    HWND hLabel = CreateWindowExW(0, L"STATIC", L"勾选要写入 .gitignore 的规则类别：", WS_CHILD | WS_VISIBLE,
+        m, m, w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
+    SendMessageW(hLabel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    int cy = m + lblH + (int)(6 * g_scale);
+    for (int i = 0; i < n; ++i) {
+        HWND cb = CreateWindowExW(0, L"BUTTON", GI_OPTIONS[i].title,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            m, cy, w - 2 * m, cbH, dlg, (HMENU)(UINT_PTR)(100 + i), g_hInst, nullptr);
+        SendMessageW(cb, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+        SendMessageW(cb, BM_SETCHECK, GI_OPTIONS[i].dft ? BST_CHECKED : BST_UNCHECKED, 0);
+        state.hCbs.push_back(cb);
+        cy += cbH + cbGap;
+    }
+    HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        w - 2 * bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
+    HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        w - bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
+    SendMessageW(hOk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hCancel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    EnableWindow(parent, FALSE);
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(state.hCbs.empty() ? dlg : state.hCbs[0]);
+    MSG msg;
+    while (!state.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (IsDialogMessageW(dlg, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    EnableWindow(parent, TRUE);
+    SetActiveWindow(parent);
+    if (!state.ok) return std::nullopt;
+    return state.checked;
+}
 // ============================ 一键配置 ignore ===============================
 static void OpIgnoreCfg() {
     if (!EnsureRepo()) return;
+    std::error_code gec;
+    if (!fs::exists(fs::path(g_repo) / L".git", gec)) {
+        Warn(g_main, L"该目录还不是 git 仓库（.git 不存在），请先点顶栏【✚ 初始化仓库】。");
+        return;
+    }
     int n = (int)(sizeof(GI_OPTIONS) / sizeof(GI_OPTIONS[0]));
-    // TODO: 下轮补勾选弹窗——先按默认勾选直接生成（覆盖需确认），功能等价
+    auto picks = AskGiChecks(g_main, L"一键配置 ignore");
+    if (!picks) return;
     fs::path gi = fs::path(g_repo) / L".gitignore";
     std::error_code ec;
     if (fs::exists(gi, ec) && !Confirm(g_main, L"已存在 .gitignore，覆盖它吗？\n（覆盖前可先点【>_ 打开 .gitignore】查看现有内容）")) return;
     std::wstring text;
     for (int i = 0; i < n; ++i) {
-        if (!GI_OPTIONS[i].dft) continue;
+        if (!(*picks)[i]) continue;
         if (!text.empty()) text += L"\r\n\r\n";
         text += GI_OPTIONS[i].rules;
     }
-    std::ofstream f(gi, std::ios::binary | std::ios::trunc);
     std::string u = WideToUtf8(text);
+    bool hasHead = !Trim(GitOut({ L"rev-parse", L"-q", L"--verify", L"HEAD" })).empty();
+    // 与磁盘现有内容比对：完全一致则不重写文件（沿用磁盘上的）
+    bool changed = true;
+    {
+        std::ifstream rf(gi, std::ios::binary);
+        if (rf) { std::string old((std::istreambuf_iterator<char>(rf)), std::istreambuf_iterator<char>()); changed = (old != u); }
+    }
+    if (!hasHead) {
+        // 流程④首次提交：仓库尚无任何提交时，无论 .gitignore 是否新写都要完成首次提交
+        if (changed) {
+            std::ofstream f(gi, std::ios::binary | std::ios::trunc);
+            f.write(u.data(), (std::streamsize)u.size());
+            f.close();
+            OutTxt(L".gitignore 已生成，正在自动完成首次提交…");
+        } else {
+            OutTxt(L".gitignore 内容与现有一致（沿用），仓库尚无提交，正在自动完成首次提交…");
+        }
+        ExecV({ G({ L"add", L"-A" }), G({ L"commit", L"-m", L"chore: 初始化仓库" }) });
+        RefreshStatusAsync();
+        return;
+    }
+    if (!changed) {
+        OutTxt(L"勾选的规则与现有 .gitignore 内容一致，无需改动。");
+        RefreshStatusAsync();
+        return;
+    }
+    std::ofstream f(gi, std::ios::binary | std::ios::trunc);
     f.write(u.data(), (std::streamsize)u.size());
     f.close();
-    OutTxt(L"已按默认勾选生成 .gitignore。");
+    // 已有历史：只提交 ignore 这一个文件的改动
+    OutTxt(L".gitignore 已更新，正在自动提交改动…");
+    ExecV({ G({ L"add", L".gitignore" }), G({ L"commit", L"-m", L"chore: 更新 .gitignore 忽略规则" }) });
     RefreshStatusAsync();
 }
 
@@ -1803,6 +2003,7 @@ static void BuildControls() {
     g_dirEditProc = (WNDPROC)SetWindowLongPtrW(g_editDir, GWLP_WNDPROC, (LONG_PTR)DirEditSubProc);
     MkBtn(g_main, L"打开", IDC_PICKDIR, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"清空输出", IDC_CLEAROUT, 0, 0, 0, 0, g_fontUI);
+    MkBtn(g_main, L"克隆仓库", IDM_CLONE, 0, 0, 0, 0, g_fontUI);
     // 状态按钮行
     MkBtn(g_main, L"⟳ 刷新状态", IDC_REFRESH, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"⚙ 修改全局配置", IDC_GLOBALCFG, 0, 0, 0, 0, g_fontUI);
@@ -1860,13 +2061,14 @@ static void Layout() {
     }
     MoveWindow(g_topStatics[0], lblX, m + 5, lblW, lblH, TRUE);
     int entryX = lblX + lblW + (int)(4 * g_scale);
-    int entryR = W - (int)(230 * g_scale) - (int)(8 * g_scale);   /* 「打开」按钮左缘留 8px */
+    int entryR = W - (int)(308 * g_scale) - (int)(8 * g_scale);   /* 「打开」按钮左缘留 8px */
     if (entryR < entryX + (int)(120 * g_scale)) entryR = entryX + (int)(120 * g_scale);
     MoveWindow(g_editDir, entryX, m, entryR - entryX, (int)(24 * g_scale), TRUE);
-    // 打开 / 清空输出 放右端
-    HWND open = GetDlgItem(g_main, IDC_PICKDIR), clear = GetDlgItem(g_main, IDC_CLEAROUT);
-    MoveWindow(open, W - (int)(230 * g_scale), m, (int)(64 * g_scale), (int)(24 * g_scale), TRUE);
-    MoveWindow(clear, W - (int)(158 * g_scale), m, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
+    // 打开 / 清空输出 / 克隆仓库 放右端
+    HWND open = GetDlgItem(g_main, IDC_PICKDIR), clear = GetDlgItem(g_main, IDC_CLEAROUT), clone = GetDlgItem(g_main, IDM_CLONE);
+    MoveWindow(open, W - (int)(308 * g_scale), m, (int)(64 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(clear, W - (int)(236 * g_scale), m, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(clone, W - (int)(138 * g_scale), m, (int)(86 * g_scale), (int)(24 * g_scale), TRUE);
     // 左栏
     MoveWindow(g_leftPanel, 0, topH + m, leftW, H - topH - m, TRUE);
     UpdateLeftScroll(g_leftPanel);
@@ -1947,6 +2149,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id == IDC_IGNORE) { OpIgnoreCfg(); return 0; }
         if (id == IDC_OPENIGN) { OpOpenIgnore(); return 0; }
         if (id == IDC_RESET) { OpResetGit(); return 0; }
+        if (id == IDM_CLONE) { OpClone(); return 0; }
         if (id >= IDM_BASE && id < IDM_BASE + 100) {
             for (auto& cat : MENU)
                 for (auto& item : cat.items)
@@ -2017,6 +2220,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_hInst = hInst;
     MakeDpiAware();
     InitCommonControls();
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);   // Shell 对话框需要 COM
     LoadLibraryW(L"Riched20.dll");   // RichEdit 控件库（RICHEDIT_CLASS）
     g_git = FindExe(L"git");
     if (g_git.empty()) { MessageBoxW(nullptr, L"未检测到 Git，请先安装 Git for Windows。", APP_TITLE, MB_ICONERROR); return 1; }
