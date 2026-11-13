@@ -1616,19 +1616,29 @@ static void OpAbortMerge() {
     Exec({ G({ L"merge", L"--abort" }) });
 }
 static void OpGlobalCfg() {
-    // 单弹窗同窗填写 name、email 与默认分支，免去多次输入；分支下拉默认取当前 init.defaultBranch（未设置=main）
+    // 单弹窗同窗填写 name、email 与默认分支；分支下拉默认取当前 init.defaultBranch（未设置=main），main 项带（默认）标注
     std::wstring curBr = Trim(GitOut({ L"config", L"--global", L"init.defaultBranch" }));
     if (curBr.empty()) curBr = L"main";
+    std::vector<std::wstring> choices;
+    choices.push_back(L"main（默认）");
+    choices.push_back(L"master");
+    if (curBr != L"main" && curBr != L"master")
+        choices.push_back(curBr);   // 现有值非标准时保留原样，避免被静默改写
+    std::wstring dispBr = (curBr == L"main") ? L"main（默认）" : curBr;   // 预选用显示文本
     auto r = AskCfg3(g_main, L"修改全局配置",
         L"全局 user.name（提交署名，对所有仓库生效）:", Trim(GitOut({ L"config", L"--global", L"user.name" })),
         L"全局 user.email（提交邮箱）:",              Trim(GitOut({ L"config", L"--global", L"user.email" })),
-        L"默认分支（git init 新仓库的初始分支名）:",  { L"main", L"master" }, curBr);
+        L"默认分支（git init 新仓库的初始分支名）:",  choices, dispBr);
     if (!r) return;
     std::vector<std::vector<std::wstring>> cmds;
     if (!r->v1.empty()) cmds.push_back(G({ L"config", L"--global", L"user.name",  r->v1 }));
     if (!r->v2.empty()) cmds.push_back(G({ L"config", L"--global", L"user.email", r->v2 }));
-    if (r->v3.empty()) r->v3 = curBr;
-    cmds.push_back(G({ L"config", L"--global", L"init.defaultBranch", r->v3 }));
+    std::wstring br = r->v3;
+    const std::wstring dft = L"（默认）";
+    if (br.size() > dft.size() && br.compare(br.size() - dft.size(), dft.size(), dft) == 0)
+        br = br.substr(0, br.size() - dft.size());   // 去掉（默认）标注再写入配置
+    if (br.empty()) br = curBr;
+    cmds.push_back(G({ L"config", L"--global", L"init.defaultBranch", br }));
     cmds.push_back(G({ L"config", L"--global", L"--list" }));
     ExecV(cmds);
 }
