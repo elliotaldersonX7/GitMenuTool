@@ -55,7 +55,7 @@ namespace fs = std::filesystem;
 
 // ============================ 全局 ==========================================
 static const wchar_t APP_TITLE[] = L"Git 菜单工具 cpp v1";
-static const wchar_t GITEA_HINT[] = L"https://github.com/仓库名.git";
+static const wchar_t GITEA_HINT[] = L"https://github.com/用户名/仓库名.git";
 static const wchar_t PRETTY[] = L"format:%h %ad%d %s";
 static const wchar_t DATEFMT[] = L"format:%Y-%m-%d %H:%M";
 // 内置 .gitignore 模板（Keil 固件项目通用规则）
