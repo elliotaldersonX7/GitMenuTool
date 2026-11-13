@@ -991,6 +991,140 @@ static std::optional<std::pair<std::wstring, std::wstring>> AskText2(HWND parent
     SetActiveWindow(parent);
     return state.result;
 }
+// 全局配置弹窗状态：两个输入框 + 默认分支下拉；OK 收集三行文本，取消置空 result
+struct Cfg3State {
+    HWND hEdit1 = nullptr, hEdit2 = nullptr, hCombo = nullptr;
+    struct Val { std::wstring v1, v2, v3; };
+    std::optional<Val> result;
+    bool done = false;
+};
+/**
+  ******************************************************************************
+  * @brief    全局配置弹窗的命令处理：OK/取消时收集三控件内容
+  * @param    h 弹窗句柄
+  * @param    data Cfg3State 指针（创建弹窗时挂入）
+  * @retval   None
+  * @note     OK 时读取两个输入框与下拉选中项回填 result；取消时 result 置空
+  ******************************************************************************
+  */
+static LRESULT CALLBACK Cfg3DlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
+    Cfg3State* st = (Cfg3State*)data;
+    switch (m) {
+    case WM_COMMAND: {
+        int id = LOWORD(w);
+        if (id == IDOK || id == IDCANCEL) {
+            if (id == IDOK && st->hEdit1 && st->hEdit2 && st->hCombo) {
+                auto get = [](HWND e) {
+                    int len = GetWindowTextLengthW(e);
+                    std::wstring s(len, L'\0');
+                    GetWindowTextW(e, &s[0], len + 1);
+                    return Trim(s);
+                };
+                Cfg3State::Val v;
+                v.v1 = get(st->hEdit1);
+                v.v2 = get(st->hEdit2);
+                int sel = (int)SendMessageW(st->hCombo, CB_GETCURSEL, 0, 0);
+                if (sel >= 0) {
+                    int n = (int)SendMessageW(st->hCombo, CB_GETLBTEXTLEN, sel, 0);
+                    v.v3.resize(n);
+                    SendMessageW(st->hCombo, CB_GETLBTEXT, sel, (LPARAM)v.v3.data());
+                }
+                st->result = v;
+            } else {
+                st->result = std::nullopt;
+            }
+            st->done = true;
+            DestroyWindow(h);
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        st->done = true;
+        st->result = std::nullopt;
+        DestroyWindow(h);
+        return 0;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+/**
+  ******************************************************************************
+  * @brief    三控件模态弹窗：输入框1/输入框2/下拉框3，布局同 AskText2 再加一行
+  * @param    parent 父窗口（弹窗期间被禁用）
+  * @param    title 弹窗标题
+  * @param    label1/def1 第一行标签与输入框预填值
+  * @param    label2/def2 第二行标签与输入框预填值
+  * @param    label3 第三行标签（下拉说明）
+  * @param    choices 下拉候选列表
+  * @param    def3 下拉预选值（无匹配则选第一项）
+  * @retval   OK 返回三行文本（v1/v2 可为空串，v3 为选中分支）；取消返回 std::nullopt
+  * @note     模态循环内 IsDialogMessageW 负责回车/Esc/Tab 转换；回车=OK、Esc=取消
+  ******************************************************************************
+  */
+static std::optional<Cfg3State::Val> AskCfg3(HWND parent, const wchar_t* title,
+    const std::wstring& label1, const std::wstring& def1,
+    const std::wstring& label2, const std::wstring& def2,
+    const std::wstring& label3, const std::vector<std::wstring>& choices, const std::wstring& def3) {
+    int m = (int)(14 * g_scale), bw = (int)(80 * g_scale);
+    int lblH = (int)(24 * g_scale) + (int)(6 * g_scale);
+    int editH = (int)(24 * g_scale), btnH = (int)(28 * g_scale), gap = (int)(16 * g_scale);
+    // 客户区高度按三行"标签+控件"反推，再用 AdjustWindowRectEx 补上标题栏/边框
+    int ch = m + lblH + (int)(6 * g_scale) + editH + gap + lblH + (int)(6 * g_scale) + editH + gap
+           + lblH + (int)(6 * g_scale) + editH + (int)(16 * g_scale) + btnH + m;
+    RECT rcFrame = { 0, 0, (int)(470 * g_scale), ch };
+    AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    int w = rcFrame.right - rcFrame.left, h = rcFrame.bottom - rcFrame.top;
+    RECT pr; GetWindowRect(parent, &pr);
+    int x = pr.left + ((pr.right - pr.left) - w) / 2, y = pr.top + ((pr.bottom - pr.top) - h) / 2;
+    if (x < 0) x = 0; if (y < 0) y = 0;
+    Cfg3State state;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", title,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, w, h, parent, nullptr, g_hInst, nullptr);
+    SetWindowSubclass(dlg, Cfg3DlgSub, 1, (DWORD_PTR)&state);
+    HWND hLabel1 = CreateWindowExW(0, L"STATIC", label1.c_str(), WS_CHILD | WS_VISIBLE,
+        m, m, w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
+    state.hEdit1 = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", def1.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        m, m + lblH + (int)(6 * g_scale), w - 2 * m, editH, dlg, (HMENU)100, g_hInst, nullptr);
+    int y2 = m + lblH + (int)(6 * g_scale) + editH + gap;
+    HWND hLabel2 = CreateWindowExW(0, L"STATIC", label2.c_str(), WS_CHILD | WS_VISIBLE,
+        m, y2, w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
+    state.hEdit2 = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", def2.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        m, y2 + lblH + (int)(6 * g_scale), w - 2 * m, editH, dlg, (HMENU)101, g_hInst, nullptr);
+    int y3 = y2 + lblH + (int)(6 * g_scale) + editH + gap;
+    HWND hLabel3 = CreateWindowExW(0, L"STATIC", label3.c_str(), WS_CHILD | WS_VISIBLE,
+        m, y3, w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
+    // 下拉框高度参数=编辑框+展开列表区（两项候选取 editH+50 缩放像素足够）
+    state.hCombo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", nullptr,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+        m, y3 + lblH + (int)(6 * g_scale), w - 2 * m, editH + (int)(50 * g_scale), dlg, (HMENU)102, g_hInst, nullptr);
+    for (auto& c : choices) SendMessageW(state.hCombo, CB_ADDSTRING, 0, (LPARAM)c.c_str());
+    int sel = (int)SendMessageW(state.hCombo, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)def3.c_str());
+    SendMessageW(state.hCombo, CB_SETCURSEL, sel >= 0 ? sel : 0, 0);
+    HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        w - 2 * bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
+    HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        w - bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
+    SendMessageW(hLabel1, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(state.hEdit1, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hLabel2, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(state.hEdit2, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hLabel3, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(state.hCombo, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hOk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hCancel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    EnableWindow(parent, FALSE);
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(state.hEdit1);
+    MSG msg;
+    while (!state.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        // 回车→默认按钮(IDOK)、Esc→IDCANCEL、Tab 焦点切换，全由 IsDialogMessageW 标准转换
+        if (IsDialogMessageW(dlg, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    EnableWindow(parent, TRUE);
+    SetActiveWindow(parent);
+    return state.result;
+}
 // 目录选择对话框（IFileDialog：窗口可拉伸、系统记住尺寸，深目录友好；Vista+，本机 Win7 SP1 满足）
 static std::wstring LoadLastDir();   // 前置声明，定义在下方
 static std::optional<std::wstring> BrowseFolder(HWND parent, const wchar_t* title) {
@@ -1482,15 +1616,19 @@ static void OpAbortMerge() {
     Exec({ G({ L"merge", L"--abort" }) });
 }
 static void OpGlobalCfg() {
-    // 单弹窗同窗填写 name 与 email，免去两次输入
-    auto r = AskText2(g_main, L"修改全局配置",
+    // 单弹窗同窗填写 name、email 与默认分支，免去多次输入；分支下拉默认取当前 init.defaultBranch（未设置=main）
+    std::wstring curBr = Trim(GitOut({ L"config", L"--global", L"init.defaultBranch" }));
+    if (curBr.empty()) curBr = L"main";
+    auto r = AskCfg3(g_main, L"修改全局配置",
         L"全局 user.name（提交署名，对所有仓库生效）:", Trim(GitOut({ L"config", L"--global", L"user.name" })),
-        L"全局 user.email（提交邮箱）:",              Trim(GitOut({ L"config", L"--global", L"user.email" })));
+        L"全局 user.email（提交邮箱）:",              Trim(GitOut({ L"config", L"--global", L"user.email" })),
+        L"默认分支（git init 新仓库的初始分支名）:",  { L"main", L"master" }, curBr);
     if (!r) return;
     std::vector<std::vector<std::wstring>> cmds;
-    if (!r->first.empty())  cmds.push_back(G({ L"config", L"--global", L"user.name",  r->first }));
-    if (!r->second.empty()) cmds.push_back(G({ L"config", L"--global", L"user.email", r->second }));
-    if (cmds.empty()) return;
+    if (!r->v1.empty()) cmds.push_back(G({ L"config", L"--global", L"user.name",  r->v1 }));
+    if (!r->v2.empty()) cmds.push_back(G({ L"config", L"--global", L"user.email", r->v2 }));
+    if (r->v3.empty()) r->v3 = curBr;
+    cmds.push_back(G({ L"config", L"--global", L"init.defaultBranch", r->v3 }));
     cmds.push_back(G({ L"config", L"--global", L"--list" }));
     ExecV(cmds);
 }
