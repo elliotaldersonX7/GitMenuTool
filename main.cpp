@@ -1589,9 +1589,17 @@ static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UIN
     switch (m) {
     case WM_COMMAND: {
         int id = LOWORD(w), code = HIWORD(w);
+        // 选中变化即记录（SELCHANGE 时新行已是当前项），不依赖确定瞬间再读
+        if (id == 200 && code == LBN_SELCHANGE) {
+            st->sel = (int)SendMessageW(st->hList, LB_GETCURSEL, 0, 0);
+            OutTxt(Fmt(L"[调试] 列表选中 index=%d", st->sel));
+            return 0;
+        }
         // 确定按钮 或 双击列表条目
         if (id == IDOK || (id == 200 && code == LBN_DBLCLK)) {
             int sel = (int)SendMessageW(st->hList, LB_GETCURSEL, 0, 0);
+            OutTxt(Fmt(L"[调试] 确定时 LB_GETCURSEL=%d, 最近SELCHANGE=%d", sel, st->sel));
+            if (sel < 0 && st->sel >= 0) sel = st->sel;   // 兜底：确定瞬间读不到就用最近一次选中
             if (sel < 0) { MessageBoxW(h, L"请先在列表中点选一条提交。", L"提示", MB_OK | MB_ICONINFORMATION); return 0; }
             st->sel = sel;
             st->ok = true;
