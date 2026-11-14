@@ -623,11 +623,13 @@ static void LogAppend(const std::vector<Seg>& segs) {
         InvalidateRect(g_out, nullptr, FALSE);
     }
 }
-static void CopyAllLog() {
-    // 整段日志复制到剪贴板（输出区聚焦时 Ctrl+C）
+static void CopyLogRange(int lastN) {
+    // 复制日志到剪贴板：lastN<=0 = 全部；>0 = 最近 N 行
+    int from = (lastN <= 0) ? 0 : (int)g_log.size() - lastN;
+    if (from < 0) from = 0;
     std::wstring all;
-    for (auto& ln : g_log)
-        for (auto& s : ln.segs) all += s.text;
+    for (int i = from; i < (int)g_log.size(); ++i)
+        for (auto& s : g_log[i].segs) all += s.text;
     if (all.empty()) return;
     if (!OpenClipboard(g_main)) return;
     EmptyClipboard();
@@ -639,7 +641,7 @@ static void CopyAllLog() {
         SetClipboardData(CF_UNICODETEXT, hMem);
     }
     CloseClipboard();
-    LogAppend({ SegM(L"[已复制全部日志到剪贴板]", CLR_HINT) });
+    LogAppend({ SegM(Fmt(L"[已复制%s共%d行到剪贴板]", lastN <= 0 ? L"全部日志" : L"最近100行", (int)g_log.size() - from), CLR_HINT) });
 }
 static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -706,8 +708,21 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_LBUTTONDOWN:
         SetFocus(h);
         return 0;
+    case WM_CONTEXTMENU: {
+        // 右键菜单：复制入口（点击输出区后 Ctrl+C 也可复制全部）
+        HMENU m = CreatePopupMenu();
+        AppendMenuW(m, MF_STRING, 1, L"复制全部日志");
+        AppendMenuW(m, MF_STRING, 2, L"复制最近100行");
+        POINT pt = { (short)LOWORD(l), (short)HIWORD(l) };
+        if (pt.x == -1 && pt.y == -1) { RECT rc; GetClientRect(h, &rc); pt.x = rc.right / 2; pt.y = rc.bottom / 2; ClientToScreen(h, &pt); }
+        int r = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
+        DestroyMenu(m);
+        if (r == 1) CopyLogRange(0);
+        else if (r == 2) CopyLogRange(100);
+        return 0;
+    }
     case WM_KEYDOWN:
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && w == 'C') CopyAllLog();
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && w == 'C') CopyLogRange(0);
         return 0;
     case WM_SETFOCUS:
         return 0;   // 只读日志，不显示输入光标
@@ -2516,7 +2531,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int id = LOWORD(w), code = HIWORD(w);
         (void)code;
         if (id == IDC_PICKDIR) { PickDir(); return 0; }
-        if (id == IDC_CLEAROUT) { g_log.clear(); g_logScroll = 0; UpdateOutScroll(g_out); InvalidateRect(g_out, nullptr, FALSE); return 0; }
+        if (id == IDC_CLEAROUT) {
+            g_log.clear(); g_logScroll = 0; UpdateOutScroll(g_out); InvalidateRect(g_out, nullptr, FALSE);
+            OutTxt(L"提示：输出区右键可复制日志，或点击输出区后按 Ctrl+C 复制全部。");
+            return 0;
+        }
         if (id == IDC_CMDRUN) { RunCmdLine(); return 0; }
         if (id == IDC_REFRESH) { RefreshStatusAsync(); return 0; }
         if (id == IDC_GLOBALCFG) { OpGlobalCfg(); return 0; }
