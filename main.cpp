@@ -1326,6 +1326,18 @@ static bool NeedCommit() {
     }
     return false;
 }
+// 是否处于游离 HEAD（detached，如点过【跳转到标签/提交】的查看模式）
+static bool IsDetachedHead() {
+    return Trim(GitOut({ L"rev-parse", L"--symbolic-full-name", L"HEAD" })).empty();
+}
+static bool NeedBranch() {
+    // 返回 true = 游离 HEAD 已弹窗提示，调用方应中止（此时 CurBranch() 返回字面量 HEAD，推送/拉取命令无意义）
+    if (IsDetachedHead()) {
+        Warn(g_main, L"当前处于游离 HEAD（detached，查看模式）：此刻的提交不属于任何分支，无法推送/拉取。\n先回到分支再操作：\n· 点【回到 main/master 最新】回到主分支（刚用【跳转到标签/提交】查看后常用）\n· 或在底部命令行输入 git switch -c <分支名> 把当前内容建成新分支");
+        return true;
+    }
+    return false;
+}
 static std::wstring CurBranch() {
     std::wstring b = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"HEAD" }));
     return b.empty() ? L"main" : b;
@@ -1341,7 +1353,7 @@ static std::wstring RemoteFromUrl(const std::wstring& url) {
 // ============================ 各操作 ========================================
 static void OpStatus()      { Exec({ G({ L"status" }) }); }
 static void OpDiff()        { Exec({ G({ L"diff" }), G({ L"diff", L"--staged" }) }); }
-static void OpPull()        { if (!EnsureRepo() || NeedRemote() || NeedCommit()) return; Exec({ G({ L"pull", L"--no-edit" }) }); }
+static void OpPull()        { if (!EnsureRepo() || NeedRemote() || NeedCommit() || NeedBranch()) return; Exec({ G({ L"pull", L"--no-edit" }) }); }
 static void OpTagList()     { Exec({ G({ L"tag", L"-l" }) }); }
 static void OpTagPush()     { if (NeedRemote()) return; Exec({ G({ L"push", g_remote, L"--tags" }) }); }
 static void OpRemoteInfo()  { if (NeedRemote()) return; Exec({ G({ L"remote", L"-v" }), G({ L"branch", L"-vv" }) }); }
@@ -1368,7 +1380,7 @@ static void OpShow() {
 }
 // 推送核心序列（推送按钮共用）：无上游→fetch 后检查无关历史并询问强推
 static void DoPushCore() {
-    if (!EnsureRepo() || NeedRemote() || NeedCommit()) return;
+    if (!EnsureRepo() || NeedRemote() || NeedCommit() || NeedBranch()) return;
     std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     std::wstring br = CurBranch();
     GitOut({ L"fetch", L"--quiet", g_remote }, 120000);
@@ -1393,7 +1405,7 @@ static void DoPushCore() {
     ExecV(cmds);
 }
 static void OpPush() {
-    if (!EnsureRepo() || NeedRemote()) return;
+    if (!EnsureRepo() || NeedRemote() || NeedBranch()) return;
     std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     if (!up.empty()) { Exec({ G({ L"push" }) }); return; }
     DoPushCore();
@@ -1408,7 +1420,7 @@ static void OpPush() {
   ******************************************************************************
   */
 static void OpForcePush() {
-    if (!EnsureRepo() || NeedRemote() || NeedCommit()) return;
+    if (!EnsureRepo() || NeedRemote() || NeedCommit() || NeedBranch()) return;
     std::wstring br = CurBranch();
     std::wstring note = L"强制推送会用本地 " + br + L" 历史整体覆盖远端：\n"
                         L"· 远端上本地没有的提交将被丢弃（无法恢复）\n"
