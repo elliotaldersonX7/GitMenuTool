@@ -1756,7 +1756,7 @@ static void OpDeleteCommit() {
             doPush = true;
         }
     }
-    OutSep(); OutCmd(L"删除提交: 回退到 " + sha->substr(0, 10));
+    OutSep(); OutCmd(L"删除提交: 回退到 " + sha.substr(0, 10));
     ExecV(std::move(cmds));
     OutTxt(L"[提示] 若删错了，可在底部命令行输入 git reflog 查看旧提交号找回。");
     if (doPush) OutTxt(L"[提示] 若上方强推被拒（rejected/stale info），说明远端有本地没有的新提交：先点【拉取】核对，确认无误后可改用【强制推送】。");
