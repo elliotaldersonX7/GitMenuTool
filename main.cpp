@@ -1363,6 +1363,10 @@ static void OpBackMain()    { std::vector<JobCmd> v; v.push_back({ { L"SPECIAL",
 
 static void OpCommit() {
     if (!EnsureRepo()) return;
+    // 游离 HEAD 时不硬拦（临时试验提交是合理需求），但必须说清"悬空提交"的后果
+    if (IsDetachedHead()
+        && !Confirm(g_main, L"当前处于游离 HEAD（查看模式）：这次提交不属于任何分支，\n之后切回别的分支时会成为无名的\"孤儿提交\"，垃圾回收后消失。\n\n· 只是想临时试验，之后不要了 → 继续\n· 想保留这次提交 → 取消，先在底部命令行输入 git switch -c <分支名> 建分支\n\n仍要提交？"))
+        return;
     auto msg = AskText(g_main, L"提交修改", L"提交消息（一行，格式 类型(范围): 中文说明）:");
     if (!msg) return;
     if (msg->empty()) { Warn(g_main, L"消息不能为空。"); return; }
