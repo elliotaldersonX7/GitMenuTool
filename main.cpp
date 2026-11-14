@@ -1593,11 +1593,6 @@ static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UIN
         // 选中变化即记录（SELCHANGE 时新行已是当前项），不依赖确定瞬间再读
         if (id == 200 && code == LBN_SELCHANGE) {
             st->sel = (int)SendMessageW(st->hList, LB_GETCURSEL, 0, 0);
-            int dl = (int)SendMessageW(st->hList, LB_GETTEXTLEN, (WPARAM)st->sel, 0);
-            std::wstring dt(dl, L'\0');
-            if (dl > 0 && st->sel >= 0) SendMessageW(st->hList, LB_GETTEXT, (WPARAM)st->sel, (LPARAM)dt.data());
-            std::wstring dbg = (st->sel >= 0 && dl > 49) ? dt.substr(42, 7) : L"(?)";
-            OutTxt(Fmt(L"[调试] 列表选中 index=%d 短sha=%s", st->sel, dbg.c_str()));
             return 0;
         }
         // 确定按钮 或 双击列表条目
@@ -1611,8 +1606,6 @@ static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UIN
             std::wstring txt(len, L'\0');
             if (len > 0) SendMessageW(st->hList, LB_GETTEXT, (WPARAM)sel, (LPARAM)txt.data());
             st->picked = txt;
-            std::wstring dbg = (len > 49) ? txt.substr(42, 7) : L"(?)";
-            OutTxt(Fmt(L"[调试] 确定时 index=%d 短sha=%s", sel, dbg.c_str()));
             st->ok = true;
             st->done = true;
             DestroyWindow(h);
@@ -1665,10 +1658,20 @@ static std::optional<std::wstring> AskPickCommit(HWND parent, const wchar_t* tit
         m, m, w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
     SendMessageW(hLabel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     HWND hList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_HASSTRINGS,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | LBS_NOTIFY | LBS_HASSTRINGS,
         m, m + lblH + (int)(6 * g_scale), w - 2 * m, listH, dlg, (HMENU)(INT_PTR)200, g_hInst, nullptr);
     SendMessageW(hList, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
     for (auto& s : items) SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)s.c_str());
+    // 水平滚动范围按最长条目实测宽度设置（不设 extent 则 WS_HSCROLL 不生效）
+    {
+        HDC hdc = GetDC(hList);
+        HFONT hOld = (HFONT)SelectObject(hdc, g_fontMono);
+        int maxW = 0; SIZE sz;
+        for (auto& s : items) { GetTextExtentPoint32W(hdc, s.c_str(), (int)s.size(), &sz); if (sz.cx > maxW) maxW = sz.cx; }
+        SelectObject(hdc, hOld);
+        ReleaseDC(hList, hdc);
+        SendMessageW(hList, LB_SETHORIZONTALEXTENT, (WPARAM)(maxW + 16 * g_scale), 0);
+    }
     HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
         w - 2 * bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
     HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
@@ -1701,22 +1704,24 @@ static std::optional<std::wstring> AskPickCommit(HWND parent, const wchar_t* tit
 static void OpDeleteCommit() {
     if (!EnsureRepo() || NeedCommit()) return;
     if (g_busy) { Info(g_main, L"有操作正在运行，请等它完成后再删除提交。"); return; }
-    // 取最近 30 条候选：完整SHA(40字符) + '|' + 展示行(短sha 日期 说明)；完整SHA内嵌条目行首
+    // 取最近 30 条候选：短sha(10位)内嵌条目行首 + 日期 + 说明（确定时从选中行文本解析）
     std::vector<std::wstring> items;
     for (auto& ln : SplitLines(GitOut({ L"-c", L"i18n.logoutputencoding=utf-8", L"log", L"-n", L"30",
-                                        L"--pretty=format:%H|%h %ad %s", L"--date=format:%Y-%m-%d %H:%M" }, 30000))) {
+                                        L"--pretty=format:%H|%ad %s", L"--date=format:%Y-%m-%d %H:%M" }, 30000))) {
         std::wstring t = Trim(ln);
         if (t.size() < 41 || t[40] != L'|') continue;
-        items.push_back(t.substr(0, 40) + L"  " + t.substr(41));
+        items.push_back(t.substr(0, 10) + L"  " + t.substr(41));
     }
     if (items.empty()) { Info(g_main, L"读不到提交历史，请先点【查看状态】检查仓库。"); return; }
     auto picked = AskPickCommit(g_main, L"删除提交（回退）", items);
     if (!picked) return;
-    // 从选中行文本行首解析完整 SHA（不依赖列表索引，免疫任何显示顺序问题）
-    std::wstring sha = picked->substr(0, 40);
-    bool hexOk = (sha.size() == 40);
-    for (wchar_t c : sha) if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'))) hexOk = false;
+    // 从选中行文本行首解析 10 位短哈希（不依赖列表索引，免疫任何显示顺序问题），再还原完整 SHA
+    std::wstring abbr = picked->substr(0, 10);
+    bool hexOk = (abbr.size() == 10);
+    for (wchar_t c : abbr) if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'))) hexOk = false;
     if (!hexOk) { Warn(g_main, L"选中行解析提交号失败，请重试。"); return; }
+    std::wstring sha = Trim(GitOut({ L"rev-parse", abbr }));
+    if (sha.size() != 40) { Warn(g_main, Fmt(L"提交号 %s 解析失败（不存在或有歧义）。", abbr.c_str())); return; }
     OutSep(); OutTxt(L"删除提交: 选中 " + sha.substr(0, 10));
     // 计数校验：0=选中的就是最新提交；空=命令异常（与"无内容"区分开，避免误判）
     std::wstring cnt = Trim(GitOut({ L"rev-list", L"--count", sha + L"..HEAD" }));
