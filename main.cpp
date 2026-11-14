@@ -730,7 +730,6 @@ static void HandleSpecial(const std::vector<std::wstring>& argv);
 static void ExecAsync(std::vector<JobCmd> cmds) {
     bool expected = false;
     if (!g_busy.compare_exchange_strong(expected, true)) {
-        { FILE* f = fopen("C:/Users/liuao/.codebuddy/work/git_tool_cpp/exec_debug.log", "a"); if (f) { fprintf(f, "[ExecAsync] BUSY-REJECT"); fputc(10, f); fclose(f); } }
         MessageBoxW(g_main, L"上一个操作还在运行，请稍候。", L"提示", MB_OK | MB_ICONINFORMATION);
         return;
     }
@@ -1577,6 +1576,165 @@ static void OpRevert() {
     if (!sha || sha->empty()) return;
     Exec({ G({ L"revert", L"--no-edit", *sha }) });
 }
+
+// ============================ 提交选择弹窗（LISTBOX 点选） ===================
+// 弹窗状态：列表句柄 + 选中下标（OK 时有效，取消保持 -1）
+struct PickCommitState {
+    HWND hList = nullptr;
+    int sel = -1;
+    bool done = false, ok = false;
+};
+static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
+    PickCommitState* st = (PickCommitState*)data;
+    switch (m) {
+    case WM_COMMAND: {
+        int id = LOWORD(w), code = HIWORD(w);
+        // 确定按钮 或 双击列表条目
+        if (id == IDOK || (id == 200 && code == LBN_DBLCLK)) {
+            int sel = (int)SendMessageW(st->hList, LB_GETCURSEL, 0, 0);
+            if (sel < 0) { MessageBoxW(h, L"请先在列表中点选一条提交。", L"提示", MB_OK | MB_ICONINFORMATION); return 0; }
+            st->sel = sel;
+            st->ok = true;
+            st->done = true;
+            DestroyWindow(h);
+            return 0;
+        }
+        if (id == IDCANCEL) {
+            st->done = true;
+            DestroyWindow(h);
+            return 0;
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        st->done = true;
+        DestroyWindow(h);
+        return 0;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+/**
+  ******************************************************************************
+  * @brief    提交选择弹窗：LISTBOX 点选一条提交
+  * @param    parent 父窗口（主窗口，模态期间被禁用）
+  * @param    title 弹窗标题
+  * @param    disp 展示行列表（短sha 日期 说明），与 shas 一一对应
+  * @param    shas 各行对应的完整 40 位 SHA
+  * @retval   点选（或双击）条目的完整 SHA；取消/无选中返回 nullopt
+  * @note     不设默认选中，必须显式点选；双击条目等同确定
+  ******************************************************************************
+  */
+static std::optional<std::wstring> AskPickCommit(HWND parent, const wchar_t* title,
+                                                 const std::vector<std::wstring>& disp,
+                                                 const std::vector<std::wstring>& shas) {
+    int m = (int)(14 * g_scale), bw = (int)(80 * g_scale);
+    int lblH = (int)(24 * g_scale);
+    int listH = (int)(360 * g_scale);
+    int btnH = (int)(28 * g_scale);
+    int w = (int)(620 * g_scale);
+    int ch = m + lblH + (int)(6 * g_scale) + listH + (int)(16 * g_scale) + btnH + m;
+    RECT rcFrame = { 0, 0, w, ch };
+    AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    int ww = rcFrame.right - rcFrame.left, wh = rcFrame.bottom - rcFrame.top;
+    RECT pr; GetWindowRect(parent, &pr);
+    int x = pr.left + ((pr.right - pr.left) - ww) / 2, y = pr.top + ((pr.bottom - pr.top) - wh) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    PickCommitState state;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", title,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, parent, nullptr, g_hInst, nullptr);
+    SetWindowSubclass(dlg, PickCommitDlgSub, 1, (DWORD_PTR)&state);
+    HWND hLabel = CreateWindowExW(0, L"STATIC", L"点选要回退到的提交（它之后的所有提交将被删除），双击条目等同确定：", WS_CHILD | WS_VISIBLE,
+        m, m, w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
+    SendMessageW(hLabel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    HWND hList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_HASSTRINGS,
+        m, m + lblH + (int)(6 * g_scale), w - 2 * m, listH, dlg, (HMENU)(INT_PTR)200, g_hInst, nullptr);
+    SendMessageW(hList, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
+    for (auto& s : disp) SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)s.c_str());
+    HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        w - 2 * bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
+    HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        w - bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
+    SendMessageW(hOk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hCancel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    EnableWindow(parent, FALSE);
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(hList);
+    MSG msg;
+    while (!state.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (IsDialogMessageW(dlg, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    EnableWindow(parent, TRUE);
+    SetActiveWindow(parent);
+    if (!state.ok || state.sel < 0 || state.sel >= (int)shas.size()) return std::nullopt;
+    return shas[state.sel];
+}
+/**
+  ******************************************************************************
+  * @brief    删除提交（回退式）：reset --hard 到列表点选的提交，其后所有提交一并删除
+  * @param    None
+  * @retval   None
+  * @note     危险操作：将删提交逐条列出并需输入大写 Y 确认；被删提交已推送远端时
+  *           可顺手以 --force-with-lease 强推同步；误删可用 git reflog 找回提交号
+  ******************************************************************************
+  */
+static void OpDeleteCommit() {
+    if (!EnsureRepo() || NeedCommit()) return;
+    if (g_busy) { Info(g_main, L"有操作正在运行，请等它完成后再删除提交。"); return; }
+    // 取最近 30 条候选：完整SHA(40字符) + '|' + 展示行(短sha 日期 说明)
+    std::vector<std::wstring> disp, shas;
+    for (auto& ln : SplitLines(GitOut({ L"-c", L"i18n.logoutputencoding=utf-8", L"log", L"-n", L"30",
+                                        L"--pretty=format:%H|%h %ad %s", L"--date=format:%Y-%m-%d %H:%M" }, 30000))) {
+        std::wstring t = Trim(ln);
+        if (t.size() < 41 || t[40] != L'|') continue;
+        shas.push_back(t.substr(0, 40));
+        disp.push_back(t.substr(41));
+    }
+    if (shas.empty()) { Info(g_main, L"读不到提交历史，请先点【查看状态】检查仓库。"); return; }
+    auto sha = AskPickCommit(g_main, L"删除提交（回退）", disp, shas);
+    if (!sha) return;
+    // 选中的就是最新提交：没有可删内容
+    std::wstring cnt = Trim(GitOut({ L"rev-list", L"--count", *sha + L"..HEAD" }));
+    if (cnt.empty() || cnt == L"0") { Info(g_main, L"选中的就是最新提交，它之后没有可删的内容。\n撤销最新提交（保留改动）请用上一个按钮。"); return; }
+    // 工作区脏检查：reset --hard 会连未提交改动一起丢
+    int dirty = 0;
+    for (auto& l : SplitLines(GitOut({ L"status", L"--porcelain" }))) if (!Trim(l).empty()) ++dirty;
+    if (dirty > 0 && !Confirm(g_main, Fmt(L"工作区还有 %d 处未提交改动，回退会把它们一并丢弃。\n如需保留请先 stash 收起或提交。继续？", dirty))) return;
+    // 危险确认：逐条列出将删除的提交（最多列 10 条，超出只给计数）
+    std::wstring note = L"【危险】将回退到所选提交，以下 " + cnt + L" 条提交及其文件内容将被删除：\n";
+    int listed = 0;
+    for (auto& l : SplitLines(GitOut({ L"-c", L"i18n.logoutputencoding=utf-8", L"log", *sha + L"..HEAD", L"--pretty=format:%h %s" }, 30000))) {
+        std::wstring t = Trim(l);
+        if (t.empty()) continue;
+        if (++listed <= 10) note += L"· " + t + L"\n";
+    }
+    if (listed > 10) note += Fmt(L"· ……（共 %s 条，仅列出前 10 条）\n", cnt.c_str());
+    note += L"· 未推送过的提交删了就没了（急用 git reflog 可找回）\n"
+            L"· 已推送过远端的，删除后必须强制推送才能同步远端\n\n"
+            L"确认删除请输入大写 Y（其他输入或留空=取消）：";
+    auto y = AskText(g_main, L"删除提交（危险操作）", note);
+    if (!y || *y != L"Y") return;
+    // 强推判定：上游存在且远端仍指向将被删除的提交
+    std::vector<std::vector<std::wstring>> cmds;
+    cmds.push_back(G({ L"reset", L"--hard", *sha }));
+    std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
+    bool doPush = false;
+    if (!up.empty()) {
+        std::wstring rcnt = Trim(GitOut({ L"rev-list", L"--count", *sha + L"..@{u}" }));
+        if (!rcnt.empty() && rcnt != L"0"
+            && Confirm(g_main, L"被删的提交已推送过远端，远端仍指向旧历史。\n是否删除后立即强制推送远端？\n（--force-with-lease：远端有别人新提交时会被拒绝，不误覆盖）")) {
+            cmds.push_back(G({ L"push", L"--force-with-lease" }));
+            doPush = true;
+        }
+    }
+    OutSep(); OutCmd(L"删除提交: 回退到 " + sha->substr(0, 10));
+    ExecV(std::move(cmds));
+    OutTxt(L"[提示] 若删错了，可在底部命令行输入 git reflog 查看旧提交号找回。");
+    if (doPush) OutTxt(L"[提示] 若上方强推被拒（rejected/stale info），说明远端有本地没有的新提交：先点【拉取】核对，确认无误后可改用【强制推送】。");
+}
 static void OpConflictList() {
     Exec({ G({ L"diff", L"--name-only", L"--diff-filter=U" }) });
 }
@@ -1721,7 +1879,7 @@ enum {
     IDM_CLONE, IDM_STATUS, IDM_DIFF, IDM_COMMIT, IDM_PUSH, IDM_FORCE_PUSH, IDM_PULL, IDM_LOG_ALL, IDM_SHOW, IDM_REMOTE_INFO,
     IDM_TAG_LIST, IDM_TAG_NEW, IDM_TAG_PUSH, IDM_TAG_DEL,
     IDM_BRANCH_SW, IDM_BRANCH_NEW, IDM_BRANCH_MERGE, IDM_BRANCH_DEL, IDM_CHECKOUT_REF, IDM_BACK_MAIN, IDM_STASH, IDM_STASH_POP,
-    IDM_RESTORE_STAGED, IDM_RESTORE_FILE, IDM_DISCARD_ALL, IDM_UNDO_LAST, IDM_AMEND, IDM_REVERT,
+    IDM_RESTORE_STAGED, IDM_RESTORE_FILE, IDM_DISCARD_ALL, IDM_UNDO_LAST, IDM_AMEND, IDM_REVERT, IDM_DELETE_COMMIT,
     IDM_CONFLICT_LIST, IDM_NOTEPAD, IDM_MARK_RESOLVED, IDM_TAKE_OURS, IDM_TAKE_THEIRS, IDM_ABORT_MERGE,
 };
 struct MenuItem { int id; const wchar_t* name; void (*fn)(); };
@@ -1766,6 +1924,7 @@ static const MenuCat MENU[] = {
         { IDM_UNDO_LAST,      L"撤销最后一次提交(保留改动)", OpUndoLast },
         { IDM_AMEND,          L"修改最后一次提交(--amend)", OpAmend },
         { IDM_REVERT,         L"反向提交 revert", OpRevert },
+        { IDM_DELETE_COMMIT,  L"删除提交(回退)[危险]", OpDeleteCommit },
     } },
     { L"冲突处理", {
         { IDM_CONFLICT_LIST,  L"查看冲突文件列表", OpConflictList },
