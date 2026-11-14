@@ -1585,11 +1585,17 @@ struct PickCommitState {
     std::wstring picked;
     bool done = false, ok = false;
 };
+// 临时追踪日志（定位"按OK无反应"问题，闭环后移除）
+static void TraceLog(const std::wstring& s) {
+    FILE* f = _wfopen(L"C:\\Users\\liuao\\.codebuddy\\work\\git_tool_cpp\\pick_trace.log", L"a, ccs=UTF-8");
+    if (f) { fwprintf(f, L"%s\n", s.c_str()); fclose(f); }
+}
 static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
     PickCommitState* st = (PickCommitState*)data;
     switch (m) {
     case WM_COMMAND: {
         int id = LOWORD(w), code = HIWORD(w);
+        TraceLog(Fmt(L"WM_COMMAND id=%d code=%d", id, code));
         // 选中变化即记录（SELCHANGE 时新行已是当前项），不依赖确定瞬间再读
         if (id == 200 && code == LBN_SELCHANGE) {
             st->sel = (int)SendMessageW(st->hList, LB_GETCURSEL, 0, 0);
@@ -1599,12 +1605,15 @@ static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UIN
         if (id == IDOK || (id == 200 && code == LBN_DBLCLK)) {
             int sel = (int)SendMessageW(st->hList, LB_GETCURSEL, 0, 0);
             if (sel < 0 && st->sel >= 0) sel = st->sel;   // 兜底：确定瞬间读不到就用最近一次选中
+            TraceLog(Fmt(L"OK分支: sel=%d", sel));
             if (sel < 0) { MessageBoxW(h, L"请先在列表中点选一条提交。", L"提示", MB_OK | MB_ICONINFORMATION); return 0; }
             st->sel = sel;
             // 选中行全文（SHA 内嵌在行首，直接从文本解析，不依赖索引映射）
             int len = (int)SendMessageW(st->hList, LB_GETTEXTLEN, (WPARAM)sel, 0);
+            if (len < 0) len = 0;
             std::wstring txt(len, L'\0');
             if (len > 0) SendMessageW(st->hList, LB_GETTEXT, (WPARAM)sel, (LPARAM)txt.data());
+            TraceLog(Fmt(L"OK分支: len=%d 文本头=%s", len, txt.substr(0, 15).c_str()));
             st->picked = txt;
             st->ok = true;
             st->done = true;
@@ -1719,12 +1728,15 @@ static void OpDeleteCommit() {
     std::wstring abbr = picked->substr(0, 10);
     bool hexOk = (abbr.size() == 10);
     for (wchar_t c : abbr) if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'))) hexOk = false;
+    TraceLog(Fmt(L"下游: abbr=%s hexOk=%d", abbr.c_str(), (int)hexOk));
     if (!hexOk) { Warn(g_main, L"选中行解析提交号失败，请重试。"); return; }
     std::wstring sha = Trim(GitOut({ L"rev-parse", abbr }));
+    TraceLog(Fmt(L"下游: rev-parse 结果长度=%d", (int)sha.size()));
     if (sha.size() != 40) { Warn(g_main, Fmt(L"提交号 %s 解析失败（不存在或有歧义）。", abbr.c_str())); return; }
     OutSep(); OutTxt(L"删除提交: 选中 " + sha.substr(0, 10));
     // 计数校验：0=选中的就是最新提交；空=命令异常（与"无内容"区分开，避免误判）
     std::wstring cnt = Trim(GitOut({ L"rev-list", L"--count", sha + L"..HEAD" }));
+    TraceLog(L"下游: cnt=" + cnt);
     if (cnt.empty()) {
         Warn(g_main, Fmt(L"提交计数读取异常（rev-list 无输出）。\n选中提交: %s\n请点【查看状态】确认仓库正常后重试。", sha.substr(0, 10).c_str()));
         return;
@@ -1733,6 +1745,7 @@ static void OpDeleteCommit() {
     // 工作区脏检查：reset --hard 会连未提交改动一起丢
     int dirty = 0;
     for (auto& l : SplitLines(GitOut({ L"status", L"--porcelain" }))) if (!Trim(l).empty()) ++dirty;
+    TraceLog(Fmt(L"下游: dirty=%d", dirty));
     if (dirty > 0 && !Confirm(g_main, Fmt(L"工作区还有 %d 处未提交改动，回退会把它们一并丢弃。\n如需保留请先 stash 收起或提交。继续？", dirty))) return;
     // 危险确认：逐条列出将删除的提交（最多列 10 条，超出只给计数）
     std::wstring note = L"【危险】将回退到所选提交，以下 " + cnt + L" 条提交及其文件内容将被删除：\n";
@@ -1747,6 +1760,7 @@ static void OpDeleteCommit() {
             L"· 已推送过远端的，删除后必须强制推送才能同步远端\n\n"
             L"确认删除请输入大写 Y（其他输入或留空=取消）：";
     auto y = AskText(g_main, L"删除提交（危险操作）", note);
+    TraceLog(Fmt(L"下游: 危险确认输入=%s", (y && !y->empty()) ? y->c_str() : L"(空/取消)"));
     if (!y || *y != L"Y") return;
     // 强推判定：上游存在且远端仍指向将被删除的提交
     std::vector<std::vector<std::wstring>> cmds;
