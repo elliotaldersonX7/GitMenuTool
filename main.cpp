@@ -1578,10 +1578,11 @@ static void OpRevert() {
 }
 
 // ============================ 提交选择弹窗（LISTBOX 点选） ===================
-// 弹窗状态：列表句柄 + 选中下标（OK 时有效，取消保持 -1）
+// 弹窗状态：列表句柄 + 选中下标 + 选中行全文（OK 时有效，取消保持空）
 struct PickCommitState {
     HWND hList = nullptr;
     int sel = -1;
+    std::wstring picked;
     bool done = false, ok = false;
 };
 static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
@@ -1592,16 +1593,26 @@ static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UIN
         // 选中变化即记录（SELCHANGE 时新行已是当前项），不依赖确定瞬间再读
         if (id == 200 && code == LBN_SELCHANGE) {
             st->sel = (int)SendMessageW(st->hList, LB_GETCURSEL, 0, 0);
-            OutTxt(Fmt(L"[调试] 列表选中 index=%d", st->sel));
+            int dl = (int)SendMessageW(st->hList, LB_GETTEXTLEN, (WPARAM)st->sel, 0);
+            std::wstring dt(dl, L'\0');
+            if (dl > 0 && st->sel >= 0) SendMessageW(st->hList, LB_GETTEXT, (WPARAM)st->sel, (LPARAM)dt.data());
+            std::wstring dbg = (st->sel >= 0 && dl > 49) ? dt.substr(42, 7) : L"(?)";
+            OutTxt(Fmt(L"[调试] 列表选中 index=%d 短sha=%s", st->sel, dbg.c_str()));
             return 0;
         }
         // 确定按钮 或 双击列表条目
         if (id == IDOK || (id == 200 && code == LBN_DBLCLK)) {
             int sel = (int)SendMessageW(st->hList, LB_GETCURSEL, 0, 0);
-            OutTxt(Fmt(L"[调试] 确定时 LB_GETCURSEL=%d, 最近SELCHANGE=%d", sel, st->sel));
             if (sel < 0 && st->sel >= 0) sel = st->sel;   // 兜底：确定瞬间读不到就用最近一次选中
             if (sel < 0) { MessageBoxW(h, L"请先在列表中点选一条提交。", L"提示", MB_OK | MB_ICONINFORMATION); return 0; }
             st->sel = sel;
+            // 选中行全文（SHA 内嵌在行首，直接从文本解析，不依赖索引映射）
+            int len = (int)SendMessageW(st->hList, LB_GETTEXTLEN, (WPARAM)sel, 0);
+            std::wstring txt(len, L'\0');
+            if (len > 0) SendMessageW(st->hList, LB_GETTEXT, (WPARAM)sel, (LPARAM)txt.data());
+            st->picked = txt;
+            std::wstring dbg = (len > 49) ? txt.substr(42, 7) : L"(?)";
+            OutTxt(Fmt(L"[调试] 确定时 index=%d 短sha=%s", sel, dbg.c_str()));
             st->ok = true;
             st->done = true;
             DestroyWindow(h);
@@ -1626,15 +1637,13 @@ static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UIN
   * @brief    提交选择弹窗：LISTBOX 点选一条提交
   * @param    parent 父窗口（主窗口，模态期间被禁用）
   * @param    title 弹窗标题
-  * @param    disp 展示行列表（短sha 日期 说明），与 shas 一一对应
-  * @param    shas 各行对应的完整 40 位 SHA
-  * @retval   点选（或双击）条目的完整 SHA；取消/无选中返回 nullopt
+  * @param    items 条目全文列表（完整 SHA 内嵌在行首，与显示文本一体）
+  * @retval   选中行的完整条目文本（SHA 从文本解析，不依赖索引）；取消返回 nullopt
   * @note     不设默认选中，必须显式点选；双击条目等同确定
   ******************************************************************************
   */
 static std::optional<std::wstring> AskPickCommit(HWND parent, const wchar_t* title,
-                                                 const std::vector<std::wstring>& disp,
-                                                 const std::vector<std::wstring>& shas) {
+                                                 const std::vector<std::wstring>& items) {
     int m = (int)(14 * g_scale), bw = (int)(80 * g_scale);
     int lblH = (int)(24 * g_scale);
     int listH = (int)(360 * g_scale);
@@ -1659,7 +1668,7 @@ static std::optional<std::wstring> AskPickCommit(HWND parent, const wchar_t* tit
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_HASSTRINGS,
         m, m + lblH + (int)(6 * g_scale), w - 2 * m, listH, dlg, (HMENU)(INT_PTR)200, g_hInst, nullptr);
     SendMessageW(hList, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
-    for (auto& s : disp) SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)s.c_str());
+    for (auto& s : items) SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)s.c_str());
     HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
         w - 2 * bw - m, ch - m - btnH, bw, btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
     HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
@@ -1677,8 +1686,8 @@ static std::optional<std::wstring> AskPickCommit(HWND parent, const wchar_t* tit
     }
     EnableWindow(parent, TRUE);
     SetActiveWindow(parent);
-    if (!state.ok || state.sel < 0 || state.sel >= (int)shas.size()) return std::nullopt;
-    return shas[state.sel];
+    if (!state.ok || state.picked.empty()) return std::nullopt;
+    return state.picked;
 }
 /**
   ******************************************************************************
@@ -1692,26 +1701,30 @@ static std::optional<std::wstring> AskPickCommit(HWND parent, const wchar_t* tit
 static void OpDeleteCommit() {
     if (!EnsureRepo() || NeedCommit()) return;
     if (g_busy) { Info(g_main, L"有操作正在运行，请等它完成后再删除提交。"); return; }
-    // 取最近 30 条候选：完整SHA(40字符) + '|' + 展示行(短sha 日期 说明)
-    std::vector<std::wstring> disp, shas;
+    // 取最近 30 条候选：完整SHA(40字符) + '|' + 展示行(短sha 日期 说明)；完整SHA内嵌条目行首
+    std::vector<std::wstring> items;
     for (auto& ln : SplitLines(GitOut({ L"-c", L"i18n.logoutputencoding=utf-8", L"log", L"-n", L"30",
                                         L"--pretty=format:%H|%h %ad %s", L"--date=format:%Y-%m-%d %H:%M" }, 30000))) {
         std::wstring t = Trim(ln);
         if (t.size() < 41 || t[40] != L'|') continue;
-        shas.push_back(t.substr(0, 40));
-        disp.push_back(t.substr(41));
+        items.push_back(t.substr(0, 40) + L"  " + t.substr(41));
     }
-    if (shas.empty()) { Info(g_main, L"读不到提交历史，请先点【查看状态】检查仓库。"); return; }
-    auto sha = AskPickCommit(g_main, L"删除提交（回退）", disp, shas);
-    if (!sha) return;
-    OutSep(); OutTxt(L"删除提交: 选中 " + sha->substr(0, 10));
+    if (items.empty()) { Info(g_main, L"读不到提交历史，请先点【查看状态】检查仓库。"); return; }
+    auto picked = AskPickCommit(g_main, L"删除提交（回退）", items);
+    if (!picked) return;
+    // 从选中行文本行首解析完整 SHA（不依赖列表索引，免疫任何显示顺序问题）
+    std::wstring sha = picked->substr(0, 40);
+    bool hexOk = (sha.size() == 40);
+    for (wchar_t c : sha) if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'))) hexOk = false;
+    if (!hexOk) { Warn(g_main, L"选中行解析提交号失败，请重试。"); return; }
+    OutSep(); OutTxt(L"删除提交: 选中 " + sha.substr(0, 10));
     // 计数校验：0=选中的就是最新提交；空=命令异常（与"无内容"区分开，避免误判）
-    std::wstring cnt = Trim(GitOut({ L"rev-list", L"--count", *sha + L"..HEAD" }));
+    std::wstring cnt = Trim(GitOut({ L"rev-list", L"--count", sha + L"..HEAD" }));
     if (cnt.empty()) {
-        Warn(g_main, Fmt(L"提交计数读取异常（rev-list 无输出）。\n选中提交: %s\n请点【查看状态】确认仓库正常后重试。", sha->substr(0, 10).c_str()));
+        Warn(g_main, Fmt(L"提交计数读取异常（rev-list 无输出）。\n选中提交: %s\n请点【查看状态】确认仓库正常后重试。", sha.substr(0, 10).c_str()));
         return;
     }
-    if (cnt == L"0") { Info(g_main, Fmt(L"选中的 [%s] 就是最新提交，它之后没有可删的内容。\n撤销最新提交（保留改动）请用上一个按钮。", sha->substr(0, 10).c_str())); return; }
+    if (cnt == L"0") { Info(g_main, Fmt(L"选中的 [%s] 就是最新提交，它之后没有可删的内容。\n撤销最新提交（保留改动）请用上一个按钮。", sha.substr(0, 10).c_str())); return; }
     // 工作区脏检查：reset --hard 会连未提交改动一起丢
     int dirty = 0;
     for (auto& l : SplitLines(GitOut({ L"status", L"--porcelain" }))) if (!Trim(l).empty()) ++dirty;
@@ -1719,7 +1732,7 @@ static void OpDeleteCommit() {
     // 危险确认：逐条列出将删除的提交（最多列 10 条，超出只给计数）
     std::wstring note = L"【危险】将回退到所选提交，以下 " + cnt + L" 条提交及其文件内容将被删除：\n";
     int listed = 0;
-    for (auto& l : SplitLines(GitOut({ L"-c", L"i18n.logoutputencoding=utf-8", L"log", *sha + L"..HEAD", L"--pretty=format:%h %s" }, 30000))) {
+    for (auto& l : SplitLines(GitOut({ L"-c", L"i18n.logoutputencoding=utf-8", L"log", sha + L"..HEAD", L"--pretty=format:%h %s" }, 30000))) {
         std::wstring t = Trim(l);
         if (t.empty()) continue;
         if (++listed <= 10) note += L"· " + t + L"\n";
@@ -1732,11 +1745,11 @@ static void OpDeleteCommit() {
     if (!y || *y != L"Y") return;
     // 强推判定：上游存在且远端仍指向将被删除的提交
     std::vector<std::vector<std::wstring>> cmds;
-    cmds.push_back(G({ L"reset", L"--hard", *sha }));
+    cmds.push_back(G({ L"reset", L"--hard", sha }));
     std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     bool doPush = false;
     if (!up.empty()) {
-        std::wstring rcnt = Trim(GitOut({ L"rev-list", L"--count", *sha + L"..@{u}" }));
+        std::wstring rcnt = Trim(GitOut({ L"rev-list", L"--count", sha + L"..@{u}" }));
         if (!rcnt.empty() && rcnt != L"0"
             && Confirm(g_main, L"被删的提交已推送过远端，远端仍指向旧历史。\n是否删除后立即强制推送远端？\n（--force-with-lease：远端有别人新提交时会被拒绝，不误覆盖）")) {
             cmds.push_back(G({ L"push", L"--force-with-lease" }));
