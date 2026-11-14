@@ -1836,6 +1836,13 @@ static void OpClone() {
     for (auto& ln : SplitLines(r.out)) if (!Trim(ln).empty()) OutTxt(ln);
     if (r.rc != 0 || !fs::exists(target / L".git", ec)) {
         OutErr(L"克隆失败，请检查地址/账号/网络");
+        // 认证失败单独提示：Windows 凭据管理器缓存的旧凭据被远端拒绝，新手最易懵
+        if (r.out.find(L"Authentication failed") != std::wstring::npos
+            || r.out.find(L"Failed to authenticate") != std::wstring::npos) {
+            OutErr(L"凭据被拒：Windows 缓存的远端账号可能已失效（如改过密码）。"
+                   L"请到 控制面板→用户账户→凭据管理器→Windows 凭据，删除 git:http://<远端地址> 开头的条目后重试，"
+                   L"下次克隆会重新弹窗输入账号密码并记住。");
+        }
         g_busy = false;
         return;
     }
