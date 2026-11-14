@@ -654,6 +654,17 @@ static int CharW() {
     }
     return w;
 }
+// 是否全角宽字符（CJK/韩文/兼容表意/全角符号，字体回退渲染为 ASCII 两倍宽）
+static bool IsWideChar(wchar_t c) {
+    return (c >= 0x2E80 && c <= 0x9FFF) || (c >= 0xAC00 && c <= 0xD7AF)
+        || (c >= 0xF900 && c <= 0xFAFF) || (c >= 0xFF00 && c <= 0xFFEF);
+}
+// 行文本前 n 个字符的像素宽度（ASCII 单宽，宽字符双宽）
+static int LineWidthUpTo(const std::wstring& t, int n) {
+    int cw = CharW(), w = 0, n2 = n < (int)t.size() ? n : (int)t.size();
+    for (int i = 0; i < n2; ++i) w += IsWideChar(t[i]) ? cw * 2 : cw;
+    return w;
+}
 // 输出区拖选状态（锚点/当前点，均为 行,字符），-1 = 无选区
 static int g_anchorL = -1, g_anchorC = 0, g_selCurL = -1, g_selCurC = 0;
 // 选区归一化：返回是否有非空选区，l0c0=起点 l1c1=终点
@@ -688,16 +699,21 @@ static void CopySelectionOrAll() {
         LogAppend({ SegM(L"[未选中文字，已复制全部日志]", CLR_HINT) });
     }
 }
-// 命中测试：客户区坐标 → (行,字符)
+// 命中测试：客户区坐标 → (行,字符)；x→字符换算感知宽字符双宽
 static void OutHitTest(POINT pt, int& line, int& ch) {
     int lh = LogLineH(), pad = (int)(6 * g_scale);
     line = (g_logScroll + pt.y) / lh;
     if (line < 0) line = 0;
     if (line >= (int)g_log.size()) line = (int)g_log.size() - 1;
-    ch = (pt.x - pad) / CharW();
-    if (ch < 0) ch = 0;
-    int llen = (int)LineText(line).size();
-    if (ch > llen) ch = llen;
+    std::wstring lt = LineText(line);
+    int x = pt.x - pad; if (x < 0) x = 0;
+    int cw = CharW(), acc = 0, i = 0;
+    for (; i < (int)lt.size(); ++i) {
+        int wch = IsWideChar(lt[i]) ? cw * 2 : cw;
+        if (x < acc + wch) break;
+        acc += wch;
+    }
+    ch = i;
 }
 static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -721,7 +737,6 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int y = first * lh - g_logScroll;
         int sl0, sc0, sl1, sc1;
         bool hasSel = SelRange(sl0, sc0, sl1, sc1);
-        int cw = CharW();
         for (int i = first; i < (int)g_log.size() && y < rc.bottom; ++i, y += lh) {
             int x = pad;
             for (auto& s : g_log[i].segs) {
@@ -732,21 +747,25 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 TextOutW(mem, x, y, s.text.c_str(), (int)s.text.size());
                 x += sz.cx;
             }
-            // 选中高亮层：按字符区间铺底色，再按分段原色重绘选中字符
+            // 选中高亮层：按前缀像素宽铺底色，再按分段原色在正确位置重绘选中字符（中文双宽感知）
             if (hasSel && i >= sl0 && i <= sl1) {
+                std::wstring lt = LineText(i);
                 int a = (i == sl0) ? sc0 : 0;
-                int b = (i == sl1) ? sc1 : (int)LineText(i).size();
+                int b = (i == sl1) ? sc1 : (int)lt.size();
                 if (b > a) {
-                    RECT hl = { pad + a * cw, y, pad + b * cw, y + lh };
+                    RECT hl = { pad + LineWidthUpTo(lt, a), y, pad + LineWidthUpTo(lt, b), y + lh };
                     HBRUSH hb = CreateSolidBrush(RGB(38, 79, 120));
                     FillRect(mem, &hl, hb);
                     DeleteObject(hb);
-                    int idx = 0, sx = pad + a * cw;
+                    int idx = 0;
                     for (auto& s : g_log[i].segs) {
                         int slen = (int)s.text.size();
                         int st = idx > a ? idx : a;
                         int en = idx + slen < b ? idx + slen : b;
-                        if (en > st) { SetTextColor(mem, s.color); TextOutW(mem, sx, y, s.text.c_str() + (st - idx), en - st); sx += (en - st) * cw; }
+                        if (en > st) {
+                            SetTextColor(mem, s.color);
+                            TextOutW(mem, pad + LineWidthUpTo(lt, st), y, s.text.c_str() + (st - idx), en - st);
+                        }
                         idx += slen;
                     }
                 }
