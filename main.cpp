@@ -1696,9 +1696,14 @@ static void OpDeleteCommit() {
     if (shas.empty()) { Info(g_main, L"读不到提交历史，请先点【查看状态】检查仓库。"); return; }
     auto sha = AskPickCommit(g_main, L"删除提交（回退）", disp, shas);
     if (!sha) return;
-    // 选中的就是最新提交：没有可删内容
+    OutSep(); OutTxt(L"删除提交: 选中 " + sha->substr(0, 10));
+    // 计数校验：0=选中的就是最新提交；空=命令异常（与"无内容"区分开，避免误判）
     std::wstring cnt = Trim(GitOut({ L"rev-list", L"--count", *sha + L"..HEAD" }));
-    if (cnt.empty() || cnt == L"0") { Info(g_main, L"选中的就是最新提交，它之后没有可删的内容。\n撤销最新提交（保留改动）请用上一个按钮。"); return; }
+    if (cnt.empty()) {
+        Warn(g_main, Fmt(L"提交计数读取异常（rev-list 无输出）。\n选中提交: %s\n请点【查看状态】确认仓库正常后重试。", sha->substr(0, 10).c_str()));
+        return;
+    }
+    if (cnt == L"0") { Info(g_main, Fmt(L"选中的 [%s] 就是最新提交，它之后没有可删的内容。\n撤销最新提交（保留改动）请用上一个按钮。", sha->substr(0, 10).c_str())); return; }
     // 工作区脏检查：reset --hard 会连未提交改动一起丢
     int dirty = 0;
     for (auto& l : SplitLines(GitOut({ L"status", L"--porcelain" }))) if (!Trim(l).empty()) ++dirty;
