@@ -623,13 +623,7 @@ static void LogAppend(const std::vector<Seg>& segs) {
         InvalidateRect(g_out, nullptr, FALSE);
     }
 }
-static void CopyLogRange(int lastN) {
-    // 复制日志到剪贴板：lastN<=0 = 全部；>0 = 最近 N 行
-    int from = (lastN <= 0) ? 0 : (int)g_log.size() - lastN;
-    if (from < 0) from = 0;
-    std::wstring all;
-    for (int i = from; i < (int)g_log.size(); ++i)
-        for (auto& s : g_log[i].segs) all += s.text;
+static void CopyTextToClipboard(const std::wstring& all) {
     if (all.empty()) return;
     if (!OpenClipboard(g_main)) return;
     EmptyClipboard();
@@ -641,7 +635,69 @@ static void CopyLogRange(int lastN) {
         SetClipboardData(CF_UNICODETEXT, hMem);
     }
     CloseClipboard();
-    LogAppend({ SegM(Fmt(L"[已复制%s共%d行到剪贴板]", lastN <= 0 ? L"全部日志" : L"最近100行", (int)g_log.size() - from), CLR_HINT) });
+}
+static std::wstring LineText(int i) {
+    std::wstring s;
+    for (auto& sg : g_log[i].segs) s += sg.text;
+    return s;
+}
+// 等宽字体单字符宽度（Consolas 全字等宽，拖选命中与高亮都用它换算）
+static int CharW() {
+    static int w = -1;
+    if (w < 0) {
+        HDC dc = GetDC(nullptr);
+        HFONT of = (HFONT)SelectObject(dc, g_fontMono);
+        SIZE sz; GetTextExtentPoint32W(dc, L"0000000000", 10, &sz);
+        SelectObject(dc, of);
+        ReleaseDC(nullptr, dc);
+        w = sz.cx / 10; if (w < 1) w = 1;
+    }
+    return w;
+}
+// 输出区拖选状态（锚点/当前点，均为 行,字符），-1 = 无选区
+static int g_anchorL = -1, g_anchorC = 0, g_selCurL = -1, g_selCurC = 0;
+// 选区归一化：返回是否有非空选区，l0c0=起点 l1c1=终点
+static bool SelRange(int& l0, int& c0, int& l1, int& c1) {
+    if (g_anchorL < 0 || g_selCurL < 0) return false;
+    if (g_anchorL < g_selCurL || (g_anchorL == g_selCurL && g_anchorC <= g_selCurC)) {
+        l0 = g_anchorL; c0 = g_anchorC; l1 = g_selCurL; c1 = g_selCurC;
+    } else {
+        l0 = g_selCurL; c0 = g_selCurC; l1 = g_anchorL; c1 = g_anchorC;
+    }
+    return (l0 != l1 || c0 != c1);
+}
+static void CopySelectionOrAll() {
+    int l0, c0, l1, c1;
+    std::wstring all;
+    if (SelRange(l0, c0, l1, c1)) {
+        for (int i = l0; i <= l1; ++i) {
+            std::wstring line = LineText(i);
+            int a = (i == l0) ? c0 : 0;
+            int b = (i == l1) ? c1 : (int)line.size();
+            if (a < 0) a = 0;
+            if (b > (int)line.size()) b = (int)line.size();
+            if (b > a) all += line.substr(a, b - a);
+            if (i < l1) all += L"\r\n";
+        }
+        CopyTextToClipboard(all);
+        LogAppend({ SegM(L"[已复制选中文本]", CLR_HINT) });
+    } else {
+        for (auto& ln : g_log)
+            for (auto& s : ln.segs) all += s.text;
+        CopyTextToClipboard(all);
+        LogAppend({ SegM(L"[未选中文字，已复制全部日志]", CLR_HINT) });
+    }
+}
+// 命中测试：客户区坐标 → (行,字符)
+static void OutHitTest(POINT pt, int& line, int& ch) {
+    int lh = LogLineH(), pad = (int)(6 * g_scale);
+    line = (g_logScroll + pt.y) / lh;
+    if (line < 0) line = 0;
+    if (line >= (int)g_log.size()) line = (int)g_log.size() - 1;
+    ch = (pt.x - pad) / CharW();
+    if (ch < 0) ch = 0;
+    int llen = (int)LineText(line).size();
+    if (ch > llen) ch = llen;
 }
 static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -663,6 +719,9 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int pad = (int)(6 * g_scale);
         int first = g_logScroll / lh;
         int y = first * lh - g_logScroll;
+        int sl0, sc0, sl1, sc1;
+        bool hasSel = SelRange(sl0, sc0, sl1, sc1);
+        int cw = CharW();
         for (int i = first; i < (int)g_log.size() && y < rc.bottom; ++i, y += lh) {
             int x = pad;
             for (auto& s : g_log[i].segs) {
@@ -672,6 +731,25 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 GetTextExtentPoint32W(mem, s.text.c_str(), (int)s.text.size(), &sz);
                 TextOutW(mem, x, y, s.text.c_str(), (int)s.text.size());
                 x += sz.cx;
+            }
+            // 选中高亮层：按字符区间铺底色，再按分段原色重绘选中字符
+            if (hasSel && i >= sl0 && i <= sl1) {
+                int a = (i == sl0) ? sc0 : 0;
+                int b = (i == sl1) ? sc1 : (int)LineText(i).size();
+                if (b > a) {
+                    RECT hl = { pad + a * cw, y, pad + b * cw, y + lh };
+                    HBRUSH hb = CreateSolidBrush(RGB(38, 79, 120));
+                    FillRect(mem, &hl, hb);
+                    DeleteObject(hb);
+                    int idx = 0, sx = pad + a * cw;
+                    for (auto& s : g_log[i].segs) {
+                        int slen = (int)s.text.size();
+                        int st = idx > a ? idx : a;
+                        int en = idx + slen < b ? idx + slen : b;
+                        if (en > st) { SetTextColor(mem, s.color); TextOutW(mem, sx, y, s.text.c_str() + (st - idx), en - st); sx += (en - st) * cw; }
+                        idx += slen;
+                    }
+                }
             }
         }
         BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);   // 双缓冲回贴到窗口
@@ -705,24 +783,55 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         OutScrollTo(h, pos);
         return 0;
     }
-    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDOWN: {
         SetFocus(h);
+        if (!g_log.empty()) {
+            SetCapture(h);
+            OutHitTest({ (short)LOWORD(l), (short)HIWORD(l) }, g_anchorL, g_anchorC);
+            g_selCurL = g_anchorL; g_selCurC = g_anchorC;
+            InvalidateRect(h, nullptr, FALSE);
+        }
         return 0;
-    case WM_CONTEXTMENU: {
-        // 右键菜单：复制入口（点击输出区后 Ctrl+C 也可复制全部）
-        HMENU m = CreatePopupMenu();
-        AppendMenuW(m, MF_STRING, 1, L"复制全部日志");
-        AppendMenuW(m, MF_STRING, 2, L"复制最近100行");
-        POINT pt = { (short)LOWORD(l), (short)HIWORD(l) };
-        if (pt.x == -1 && pt.y == -1) { RECT rc; GetClientRect(h, &rc); pt.x = rc.right / 2; pt.y = rc.bottom / 2; ClientToScreen(h, &pt); }
-        int r = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
-        DestroyMenu(m);
-        if (r == 1) CopyLogRange(0);
-        else if (r == 2) CopyLogRange(100);
+    }
+    case WM_MOUSEMOVE:
+        if ((w & MK_LBUTTON) && !g_log.empty() && g_anchorL >= 0) {
+            int line, ch;
+            OutHitTest({ (short)LOWORD(l), (short)HIWORD(l) }, line, ch);
+            if (line != g_selCurL || ch != g_selCurC) {
+                g_selCurL = line; g_selCurC = ch;
+                InvalidateRect(h, nullptr, FALSE);
+            }
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        if (GetCapture() == h) ReleaseCapture();
+        return 0;
+    case WM_LBUTTONDBLCLK: {
+        // 双击选中整行
+        if (!g_log.empty()) {
+            SetFocus(h);
+            int line, ch;
+            OutHitTest({ (short)LOWORD(l), (short)HIWORD(l) }, line, ch);
+            g_anchorL = line; g_anchorC = 0;
+            g_selCurL = line; g_selCurC = (int)LineText(line).size();
+            InvalidateRect(h, nullptr, FALSE);
+        }
         return 0;
     }
     case WM_KEYDOWN:
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && w == 'C') CopyLogRange(0);
+        if (GetKeyState(VK_CONTROL) & 0x8000) {
+            if (w == 'C') CopySelectionOrAll();
+            else if (w == 'A' && !g_log.empty()) {
+                g_anchorL = 0; g_anchorC = 0;
+                g_selCurL = (int)g_log.size() - 1;
+                g_selCurC = (int)LineText(g_selCurL).size();
+                InvalidateRect(h, nullptr, FALSE);
+            }
+            else if (w == 'V') {   // 输出区只读：粘贴转交命令输入行
+                SetFocus(g_cmdEdit);
+                PostMessageW(g_cmdEdit, WM_PASTE, 0, 0);
+            }
+        }
         return 0;
     case WM_SETFOCUS:
         return 0;   // 只读日志，不显示输入光标
@@ -2532,8 +2641,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         (void)code;
         if (id == IDC_PICKDIR) { PickDir(); return 0; }
         if (id == IDC_CLEAROUT) {
-            g_log.clear(); g_logScroll = 0; UpdateOutScroll(g_out); InvalidateRect(g_out, nullptr, FALSE);
-            OutTxt(L"提示：输出区右键可复制日志，或点击输出区后按 Ctrl+C 复制全部。");
+            g_log.clear(); g_logScroll = 0; g_anchorL = g_selCurL = -1; UpdateOutScroll(g_out); InvalidateRect(g_out, nullptr, FALSE);
+            OutTxt(L"提示：输出区可拖选文字，Ctrl+C 复制选中（未选中=全部），Ctrl+A 全选，Ctrl+V 贴到命令输入行。");
             return 0;
         }
         if (id == IDC_CMDRUN) { RunCmdLine(); return 0; }
