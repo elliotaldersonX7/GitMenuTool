@@ -55,8 +55,8 @@ namespace fs = std::filesystem;
 #define IDM_BASE      2000
 
 // ============================ 全局 ==========================================
-static const wchar_t APP_TITLE[] = L"Git 菜单工具 cpp v1";
-static const wchar_t APP_VERSION[] = L"v20261116g";
+static const wchar_t APP_TITLE[] = L"Git 菜单工具";
+static const wchar_t APP_VERSION[] = L"v20261116h";
 // 在线升级：更新源 = 本工具源码仓的同名发布分支（分支名=版本号，分支里只放 GitMenuTool.exe）；
 // 走 git 协议复用系统凭据（私有库免 token），传输完整性由 git 对象哈希保证，无需额外 HTTP 库
 static const wchar_t UPDATE_REPO_URL[] = L"http://192.168.1.119:3000/OTHER/GitMenuTool.git";
