@@ -59,7 +59,7 @@ namespace fs = std::filesystem;
 
 // ============================ 全局 ==========================================
 static const wchar_t APP_TITLE[] = L"Git 菜单工具 cpp v1";
-static const wchar_t APP_VERSION[] = L"v20261116d";
+static const wchar_t APP_VERSION[] = L"v20261116e";
 // 在线升级：更新源 = 本工具源码仓的同名发布分支（分支名=版本号，分支里只放 GitMenuTool.exe）；
 // 走 git 协议复用系统凭据（私有库免 token），传输完整性由 git 对象哈希保证，无需额外 HTTP 库
 static const wchar_t UPDATE_REPO_URL[] = L"http://192.168.1.119:3000/OTHER/GitMenuTool.git";
@@ -2651,16 +2651,12 @@ static LRESULT CALLBACK LeftPanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 static HWND g_topStatics[2];
-static HWND g_titleIcon = nullptr, g_titleText = nullptr;   // 标题条内图标与标题/版本文字
+static HWND g_titleText = nullptr;                          // 标题条内标题/版本文字
 static void BuildControls() {
-    // 标题条（标准标题栏已由 WM_NCCALCSIZE 去掉）：图标 + 标题/版本 + 检查更新 + 最小化/最大化/关闭
-    wchar_t exeB[MAX_PATH]; GetModuleFileNameW(nullptr, exeB, MAX_PATH);
-    HICON hIc = ExtractIconW(g_hInst, exeB, 0);
-    g_titleIcon = CreateWindowExW(0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ICON,
-                                  0, 0, 0, 0, g_main, nullptr, g_hInst, nullptr);
-    SendMessageW(g_titleIcon, STM_SETICON, (WPARAM)hIc, 0);
+    // 标题条（标准标题栏已由 WM_NCCALCSIZE 去掉）：标题/版本 + 检查更新 + 最小化/最大化/关闭
     g_titleText = CreateWindowExW(0, L"STATIC", (std::wstring(APP_TITLE) + L" " + APP_VERSION).c_str(),
                                   WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main, nullptr, g_hInst, nullptr);
+    SendMessageW(g_titleText, WM_SETFONT, (WPARAM)g_fontUIBold, TRUE);
     MkBtn(g_main, L"检查更新", IDC_CHECKUPD, 0, 0, 0, 0, g_fontUI);   // 在线升级手动入口（标题条内）
     CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     0, 0, 0, 0, g_main, (HMENU)IDC_TBTN_MIN, g_hInst, nullptr);
@@ -2716,15 +2712,13 @@ static void Layout() {
     RECT rc; GetClientRect(g_main, &rc);
     int W = rc.right, H = rc.bottom;
     int m = (int)(6 * g_scale);
-    int topH = TitleStripH(), rowH = (int)(30 * g_scale);
+    int rowH = (int)(30 * g_scale);
     int statH = (int)(150 * g_scale), cmdH = (int)(28 * g_scale);
     int leftW = (int)(200 * g_scale);
-    // 标题条：图标 + 标题/版本 + 检查更新 …右侧 最小化/最大化/关闭（宽高取系统标题栏规格）
+    // 标题条：标题/版本 + 检查更新 …右侧 最小化/最大化/关闭（宽高取系统标题栏规格，条内控件用原始像素垂直居中）
     int stripH = TitleStripH();
     int capBtnW = GetSystemMetrics(SM_CXSIZE);
-    int sx = (int)(10 * g_scale);
-    MoveWindow(g_titleIcon, sx, 0, capBtnW, stripH, TRUE);
-    int tx = sx + capBtnW + (int)(6 * g_scale);
+    int tx = (int)(16 * g_scale);
     HDC dcs = GetDC(g_main);
     HFONT ofs = (HFONT)SelectObject(dcs, g_fontUIBold);
     SIZE ssz;
@@ -2732,10 +2726,12 @@ static void Layout() {
     GetTextExtentPoint32W(dcs, tstr.c_str(), (int)tstr.size(), &ssz);
     SelectObject(dcs, ofs);
     ReleaseDC(g_main, dcs);
-    MoveWindow(g_titleText, tx, 0, ssz.cx + (int)(8 * g_scale), stripH, TRUE);
-    int ux = tx + ssz.cx + (int)(16 * g_scale);
-    MoveWindow(GetDlgItem(g_main, IDC_CHECKUPD), ux, (stripH - (int)(24 * g_scale)) / 2,
-               (int)(88 * g_scale), (int)(24 * g_scale), TRUE);
+    int tH = ssz.cy < stripH ? ssz.cy : stripH;
+    MoveWindow(g_titleText, tx, (stripH - tH) / 2, ssz.cx + (int)(10 * g_scale), tH, TRUE);
+    int ubh = stripH * 2 / 3;
+    int ux = tx + ssz.cx + (int)(24 * g_scale);
+    MoveWindow(GetDlgItem(g_main, IDC_CHECKUPD), ux, (stripH - ubh) / 2,
+               (int)(88 * g_scale), ubh, TRUE);
     MoveWindow(GetDlgItem(g_main, IDC_TBTN_MIN), W - 3 * capBtnW, 0, capBtnW, stripH, TRUE);
     MoveWindow(GetDlgItem(g_main, IDC_TBTN_MAX), W - 2 * capBtnW, 0, capBtnW, stripH, TRUE);
     MoveWindow(GetDlgItem(g_main, IDC_TBTN_CLOSE), W - capBtnW, 0, capBtnW, stripH, TRUE);
@@ -2763,7 +2759,9 @@ static void Layout() {
     MoveWindow(clear, W - (int)(236 * g_scale), stripH + m, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
     MoveWindow(clone, W - (int)(138 * g_scale), stripH + m, (int)(86 * g_scale), (int)(24 * g_scale), TRUE);
     // 左栏
-    MoveWindow(g_leftPanel, 0, topH + m, leftW, H - topH - m, TRUE);
+    // 左栏与状态按钮行同一起点（都在"操作目录"行下方）
+    int bodyY = stripH + m + (int)(24 * g_scale) + (int)(8 * g_scale);
+    MoveWindow(g_leftPanel, 0, bodyY, leftW, H - bodyY, TRUE);
     UpdateLeftScroll(g_leftPanel);
     {   // 窗口变高后钳制滚动位置，滑块与内容保持一致
         RECT lrc; GetClientRect(g_leftPanel, &lrc);
@@ -2772,8 +2770,8 @@ static void Layout() {
         if (g_leftScroll > maxScroll) { g_leftScroll = maxScroll; InvalidateRect(g_leftPanel, nullptr, FALSE); }
     }
     int rightX = leftW + m, rightW = W - rightX - m;
-    // 状态按钮行：宽度按文字实测分配，避免小字被截断
-    int y = topH + m;
+    // 状态按钮行：起点=标题条下方（行1 高度 24 缩放像素 + 8 间距），宽度按文字实测分配，避免小字被截断
+    int y = bodyY;
     int idsSbar[6] = { IDC_REFRESH, IDC_GLOBALCFG, IDC_INIT, IDC_IGNORE, IDC_OPENIGN, IDC_RESET };
     int wtxt[6]; int total = 0;
     HDC dc = GetDC(g_main);
@@ -3043,6 +3041,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_topStatics[0] = MkStatic(g_main, L"操作目录:", 0, 0, 0, 0, 0, g_fontUI);
     g_topStatics[1] = MkStatic(g_main, L">_", 0, 0, 0, 0, 0, g_fontMono);
     BuildControls();
+    // 强制重算非客户区：让 WM_NCCALCSIZE(wParam=TRUE) 真正执行一次，去掉标准标题栏（否则只有 w=0 的消息，调整不生效）
+    SetWindowPos(g_main, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     SetTimer(g_main, 1, 4000, nullptr);          // 每 4 秒自动刷新状态卡
     SetTimer(g_main, 2, 30 * 60 * 1000, nullptr); // 每 30 分钟在线升级自检
     ShowWindow(g_main, nCmdShow);
