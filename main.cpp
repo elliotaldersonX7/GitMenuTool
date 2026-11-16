@@ -51,10 +51,16 @@ namespace fs = std::filesystem;
 #define IDC_STAT      119
 #define IDC_OUT       120
 #define IDC_LEFT      121
+#define IDC_CHECKUPD  122
 #define IDM_BASE      2000
 
 // ============================ 全局 ==========================================
 static const wchar_t APP_TITLE[] = L"Git 菜单工具 cpp v1";
+static const wchar_t APP_VERSION[] = L"v20261116c";
+// 在线升级：更新源 = 本工具源码仓的同名发布分支（分支名=版本号，分支里只放 GitMenuTool.exe）；
+// 走 git 协议复用系统凭据（私有库免 token），传输完整性由 git 对象哈希保证，无需额外 HTTP 库
+static const wchar_t UPDATE_REPO_URL[] = L"http://192.168.1.119:3000/OTHER/GitMenuTool.git";
+static const wchar_t UPDATE_ASSET[] = L"GitMenuTool.exe";
 static const wchar_t GITEA_HINT[] = L"https://github.com/用户名/仓库名.git";
 static const wchar_t PRETTY[] = L"format:%h %ad%d %s";
 static const wchar_t DATEFMT[] = L"format:%Y-%m-%d %H:%M";
@@ -868,6 +874,18 @@ struct JobMsg { int kind; std::wstring text; };                     // kind: 0=c
 static const UINT WM_APP_JOBMSG  = WM_APP + 1;                      // wParam=JobMsg*(堆)
 static const UINT WM_APP_JOBDONE = WM_APP + 2;
 static const UINT WM_APP_STATUS  = WM_APP + 3;                      // wParam=segments(堆)
+static const UINT WM_APP_UPDATE  = WM_APP + 4;                      // wParam=UpdateInfo*(堆)：在线升级检查/升级结果
+// ============================ 在线升级共享态 =================================
+struct UpdateInfo {
+    bool manual = false;      // 手动检查（顶栏按钮触发：无论结果都弹窗反馈）
+    bool ok = false;          // 检查/升级各阶段是否成功
+    bool newer = false;       // 远端存在新版本
+    bool upgrading = false;   // 升级流程的回执（失败时弹窗说明并解除操作屏蔽）
+    std::wstring remoteVer, curVer, exeUrl, err;
+};
+static bool g_updateNagged = false;     // 本次会话已提示过新版本（点"稍后"后自动检查不再打扰）
+static std::atomic<bool> g_updateChecking{ false };   // 防止自动/手动检查并发重复弹窗
+static void OpCheckUpdate();            // 定义在在线升级模块；顶栏【检查更新】回调
 // 单任务串行：逐条执行，非 optional 失败即中止；SPECIAL 命令见 HandleSpecial
 static void HandleSpecial(const std::vector<std::wstring>& argv);
 static void ExecAsync(std::vector<JobCmd> cmds) {
@@ -1441,6 +1459,119 @@ static void RefreshStatusAsync() {
         auto* segs = BuildStatusSegs();
         PostMessageW(g_main, WM_APP_STATUS, (WPARAM)segs, 0);
     }).detach();
+}
+
+// ============================ 在线升级 =======================================
+// 版本比较：v数字[后缀字母]（如 v20261116a）。数字部分比大小；同数字比后缀（无后缀<字母，字母按 ASCII 递增）
+static bool VersionNewer(const std::wstring& remote, const std::wstring& cur) {
+    auto parse = [](const std::wstring& s, long long& num, wchar_t& suf) {
+        size_t i = 0;
+        if (i < s.size() && (s[i] == L'v' || s[i] == L'V')) ++i;
+        num = 0; bool hasNum = false;
+        while (i < s.size() && s[i] >= L'0' && s[i] <= L'9') { num = num * 10 + (s[i] - L'0'); ++i; hasNum = true; }
+        suf = (i < s.size()) ? s[i] : 0;
+        return hasNum;
+    };
+    long long rn = 0, cn = 0; wchar_t rs = 0, cs = 0;
+    if (!parse(remote, rn, rs) || !parse(cur, cn, cs)) return remote != cur;   // 非常规格式退化为"不同即新"
+    if (rn != cn) return rn > cn;
+    return rs > cs;
+}
+// 后台检查更新：ls-remote 列出更新源全部发布分支（分支名=版本号），取最大版本与当前比对。
+// 走 git 协议（复用系统凭据，私有库免 token）；结果经 WM_APP_UPDATE 投回 UI 线程
+static void UpdateCheckAsync(bool manual) {
+    bool expected = false;
+    if (!g_updateChecking.compare_exchange_strong(expected, true)) return;
+    std::thread([manual]() {
+        UpdateInfo* ui = new UpdateInfo();
+        ui->manual = manual;
+        ui->curVer = APP_VERSION;
+        std::wstring out = GitOut({ L"ls-remote", L"--heads", UPDATE_REPO_URL }, 15000);
+        if (Trim(out).empty()) {
+            ui->err = L"读不到更新源的分支列表（远端不可达/无发布分支/凭据失效）";
+        } else {
+            std::wstring best;
+            for (auto& l : SplitLines(out)) {
+                size_t p = l.find(L"refs/heads/v");
+                if (p == std::wstring::npos) continue;
+                std::wstring v = Trim(l.substr(p + 11));   // 去掉 refs/heads/ 前缀
+                if (best.empty() || VersionNewer(v, best)) best = v;
+            }
+            if (best.empty()) ui->err = L"更新源没有 v 开头的发布分支（从未发布过）";
+            else { ui->remoteVer = best; ui->ok = true; ui->newer = VersionNewer(best, APP_VERSION); }
+        }
+        g_updateChecking = false;
+        PostMessageW(g_main, WM_APP_UPDATE, (WPARAM)ui, 0);
+    }).detach();
+}
+// 后台升级：浅克隆发布分支（内含新版 exe）→ "换身"替换自身 → 延迟脚本删旧版并自动重启。
+// 运行中的 exe 不能被覆盖但能被改名：旧版改名让位、新版顶上原位，全程用户无感
+static void UpdateUpgradeAsync(UpdateInfo ui) {
+    g_busy = true;   // 升级期间屏蔽其它操作（成功即退出进程，失败由 WM_APP_UPDATE 回执解除）
+    std::thread([ui]() {
+        auto log = [](int kind, const std::wstring& s) { PostMessageW(g_main, WM_APP_JOBMSG, (WPARAM)new JobMsg{ kind, s }, 0); };
+        auto fail = [&log](const std::wstring& why) {
+            UpdateInfo* f = new UpdateInfo();
+            f->manual = true; f->upgrading = true; f->err = why;
+            PostMessageW(g_main, WM_APP_UPDATE, (WPARAM)f, 0);
+        };
+        wchar_t buf[MAX_PATH]; GetModuleFileNameW(nullptr, buf, MAX_PATH);
+        fs::path exe(buf), dir = exe.parent_path();
+        fs::path newPath = dir / L"GitMenuTool.exe.new", oldPath = dir / L"GitMenuTool.exe.old";
+        std::error_code ec;
+        log(0, L"在线升级: git clone --depth 1 --single-branch --branch " + ui.remoteVer);
+        // 下载：浅克隆发布分支到临时目录（git 对象哈希保证传输完整性，无需另做校验）
+        fs::path tmpBase = fs::temp_directory_path(ec) / L"GitMenuTool_update";
+        if (ec) { fail(L"取临时目录失败"); return; }
+        fs::remove_all(tmpBase, ec);
+        fs::create_directories(tmpBase, ec);   // 重建：它是 clone 子进程的工作目录，不存在会直接启动失败
+        fs::path tmp = tmpBase / ui.remoteVer;
+        GitResult r = RunGit(G({ L"clone", L"--depth", L"1", L"--single-branch", L"--branch", ui.remoteVer,
+                                 UPDATE_REPO_URL, tmp.wstring() }), tmpBase.wstring(), 300000);
+        for (auto& ln : SplitLines(r.out)) if (!Trim(ln).empty()) log(2, ln);
+        fs::path srcExe = tmp / UPDATE_ASSET;
+        if (r.rc != 0 || !fs::exists(srcExe, ec)) {
+            fail(L"下载新版本失败（clone 失败或发布分支里缺 GitMenuTool.exe）。");
+            return;
+        }
+        // 换身
+        log(1, L"下载完成，正在替换程序…");
+        DeleteFileW(oldPath.c_str());
+        if (!MoveFileW(exe.c_str(), oldPath.c_str())) { fail(L"重命名当前程序失败（文件被占用或权限不足）。"); return; }
+        // 跨卷移动（临时目录与 exe 可能不在同一盘）必须带 MOVEFILE_COPY_ALLOWED；失败重试（防杀软短暂锁文件）
+        bool moved = false; DWORD gle = 0;
+        for (int i = 0; i < 5 && !moved; ++i) {
+            moved = MoveFileExW(srcExe.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+            if (!moved) { gle = GetLastError(); Sleep(300); }
+        }
+        if (!moved) {
+            MoveFileW(oldPath.c_str(), exe.c_str());   // 回滚，保证工具仍可用
+            fail(Fmt(L"放入新版本失败（GetLastError=%u），已回滚原程序。", gle));
+            return;
+        }
+        fs::remove_all(tmpBase, ec);
+        // 延迟脚本：等本进程退出后删 .old 并启动新版（重启失败不致命，新 exe 已就位可手动打开）
+        std::wstring cmd = L"cmd.exe /c timeout /t 2 /nobreak >nul & del /q \"" + oldPath.wstring()
+                         + L"\" & start \"\" \"" + exe.wstring() + L"\"";
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi = {};
+        std::vector<wchar_t> cmdz(cmd.begin(), cmd.end()); cmdz.push_back(L'\0');
+        if (!CreateProcessW(nullptr, cmdz.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                            nullptr, dir.c_str(), &si, &pi)) {
+            log(2, L"自动重启安排失败，请手动重新打开 GitMenuTool.exe。");
+        } else {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        log(1, L"升级到 " + ui.remoteVer + L" 完成，即将自动重启…");
+        PostMessageW(g_main, WM_CLOSE, 0, 0);   // 主窗销毁会连带关闭齿轮弹窗，模态循环随 PostQuitMessage 退出
+    }).detach();
+}
+// 顶栏【检查更新】入口：按钮进入检查中态，结果经 WM_APP_UPDATE 回 UI 线程后复位
+static void OpCheckUpdate() {
+    HWND hTopBtn = GetDlgItem(g_main, IDC_CHECKUPD);
+    if (hTopBtn) { EnableWindow(hTopBtn, FALSE); SetWindowTextW(hTopBtn, L"检查中…"); }
+    UpdateCheckAsync(true);
 }
 
 // ============================ 操作前置检查 ==================================
@@ -2529,6 +2660,7 @@ static void BuildControls() {
     MkBtn(g_main, L"⤓ 一键配置ignore", IDC_IGNORE, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L">_ 打开 .gitignore", IDC_OPENIGN, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"清空Git重来", IDC_RESET, 0, 0, 0, 0, g_fontUI);
+    MkBtn(g_main, L"↻ 检查更新", IDC_CHECKUPD, 0, 0, 0, 0, g_fontUI);   // 在线升级手动入口（顶栏）
     // 状态卡（RichEdit）+ 输出区（自绘黑底日志）
     g_stat = NewRich(g_main, (HMENU)IDC_STAT, RGB(0xff, 0xff, 0xff));
     g_out  = CreateWindowExW(0, L"GIT_OUT", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL,
@@ -2599,12 +2731,12 @@ static void Layout() {
     int rightX = leftW + m, rightW = W - rightX - m;
     // 状态按钮行：宽度按文字实测分配，避免小字被截断
     int y = topH + m;
-    int idsSbar[6] = { IDC_REFRESH, IDC_GLOBALCFG, IDC_INIT, IDC_IGNORE, IDC_OPENIGN, IDC_RESET };
-    int wtxt[6]; int total = 0;
+    int idsSbar[7] = { IDC_REFRESH, IDC_GLOBALCFG, IDC_INIT, IDC_IGNORE, IDC_OPENIGN, IDC_RESET, IDC_CHECKUPD };
+    int wtxt[7]; int total = 0;
     HDC dc = GetDC(g_main);
     HFONT of = (HFONT)SelectObject(dc, g_fontUI);
     SIZE sz;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         wchar_t t[64]; GetDlgItemTextW(g_main, idsSbar[i], t, 64);
         GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
         wtxt[i] = sz.cx + (int)(22 * g_scale);
@@ -2612,11 +2744,11 @@ static void Layout() {
     }
     SelectObject(dc, of);
     ReleaseDC(g_main, dc);
-    total += 5 * (int)(4 * g_scale);
+    total += 6 * (int)(4 * g_scale);
     int avail = rightW - (int)(8 * g_scale);
     double fit = total > avail ? (double)avail / total : 1.0;
     int x2 = rightX;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         int w2 = (int)(wtxt[i] * fit) - (int)(4 * g_scale);
         MoveWindow(GetDlgItem(g_main, idsSbar[i]), x2, y, w2, rowH, TRUE);
         x2 += w2 + (int)(4 * g_scale);
@@ -2671,6 +2803,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id == IDC_IGNORE) { OpIgnoreCfg(); return 0; }
         if (id == IDC_OPENIGN) { OpOpenIgnore(); return 0; }
         if (id == IDC_RESET) { OpResetGit(); return 0; }
+        if (id == IDC_CHECKUPD) { OpCheckUpdate(); return 0; }   // 顶栏【检查更新】（在线升级手动入口）
         if (id == IDM_CLONE) { OpClone(); return 0; }
         if (id >= IDM_BASE && id < IDM_BASE + 100) {
             for (auto& cat : MENU)
@@ -2709,12 +2842,40 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         RenderStatus((std::vector<std::vector<Seg>>*)w);
         InvalidateRect(g_leftPanel, nullptr, FALSE);   // g_flowBlock 可能变化，左栏灰/亮态同步重绘
         return 0;
+    case WM_APP_UPDATE: {
+        // 在线升级检查/升级回执；manual=顶栏按钮触发（结果一律弹窗），否则静默（仅发现新版才弹）
+        UpdateInfo* ui = (UpdateInfo*)w;
+        HWND parent = g_main;
+        if (ui->upgrading) {
+            g_busy = false;   // 升级链路结束（无论成败），解除操作屏蔽
+            if (!ui->ok && !ui->err.empty())
+                Warn(parent, L"升级失败：" + ui->err + L"\n当前程序未做任何更改，可继续使用。");
+        } else if (!ui->ok) {
+            if (ui->manual) Warn(parent, L"检查更新失败：\n" + ui->err);
+            else OutTxt(L"[检查更新] " + ui->err + L"（后台静默检查，不影响使用）");
+        } else if (ui->newer) {
+            g_updateNagged = true;
+            std::wstring msg = L"发现新版本 " + ui->remoteVer + L"（当前 " + ui->curVer + L"）。\n\n"
+                               L"是否升级？\n点【是】将自动下载并替换程序，完成后自动重启。";
+            if (MessageBoxW(parent, msg.c_str(), L"检查更新", MB_YESNO | MB_ICONQUESTION) == IDYES)
+                UpdateUpgradeAsync(*ui);
+        } else if (ui->manual) {
+            Info(parent, L"当前已是最新版本 " + ui->curVer + L"。");
+        }
+        HWND hTopBtn = GetDlgItem(g_main, IDC_CHECKUPD);   // 顶栏按钮复位
+        if (hTopBtn) { EnableWindow(hTopBtn, TRUE); SetWindowTextW(hTopBtn, L"↻ 检查更新"); }
+        delete ui;
+        return 0;
+    }
     case WM_TIMER:
         // 定时自动刷新状态卡：感知工具外部的改动（他处提交/推送/切分支），空闲时才刷新
         if (w == 1 && !g_busy && !g_statusRunning) RefreshStatusAsync();
+        // 在线升级周期自检：每 30 分钟一次；已提示过（点了"稍后"）或操作运行中则跳过
+        if (w == 2 && !g_busy && !g_updateNagged) UpdateCheckAsync(false);
         return 0;
     case WM_DESTROY:
         KillTimer(g_main, 1);
+        KillTimer(g_main, 2);
         PostQuitMessage(0);
         return 0;
     }
@@ -2778,14 +2939,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     int W = (int)(1080 * g_scale), H = (int)(640 * g_scale);
     int x = std::max(0, (GetSystemMetrics(SM_CXSCREEN) - W) / 2);
     int y = std::max(0, (GetSystemMetrics(SM_CYSCREEN) - H) / 2);
-    g_main = CreateWindowExW(0, L"GIT_MENU_MAIN", APP_TITLE,
+    g_main = CreateWindowExW(0, L"GIT_MENU_MAIN",
+                             (std::wstring(APP_TITLE) + L" " + APP_VERSION).c_str(),
                              WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,   // 主窗不擦子控件区，否则白底盖住 RichEdit 黑底
                              x, y, W, H, nullptr, nullptr, hInst, nullptr);
     // 顶栏两个 STATIC（Layout 引用 g_topStatics）
     g_topStatics[0] = MkStatic(g_main, L"操作目录:", 0, 0, 0, 0, 0, g_fontUI);
     g_topStatics[1] = MkStatic(g_main, L">_", 0, 0, 0, 0, 0, g_fontMono);
     BuildControls();
-    SetTimer(g_main, 1, 4000, nullptr);   // 每 4 秒自动刷新状态卡
+    SetTimer(g_main, 1, 4000, nullptr);          // 每 4 秒自动刷新状态卡
+    SetTimer(g_main, 2, 30 * 60 * 1000, nullptr); // 每 30 分钟在线升级自检
     ShowWindow(g_main, nCmdShow);
     UpdateWindow(g_main);
     // 记住上次目录
@@ -2796,6 +2959,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     } else {
         RefreshStatusAsync();
     }
+    UpdateCheckAsync(false);   // 启动后台静默检查更新（有新版才弹窗询问）
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
