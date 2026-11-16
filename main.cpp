@@ -56,7 +56,7 @@ namespace fs = std::filesystem;
 
 // ============================ 全局 ==========================================
 static const wchar_t APP_TITLE[] = L"Git 菜单工具 cpp v1";
-static const wchar_t APP_VERSION[] = L"v20261116f";
+static const wchar_t APP_VERSION[] = L"v20261116g";
 // 在线升级：更新源 = 本工具源码仓的同名发布分支（分支名=版本号，分支里只放 GitMenuTool.exe）；
 // 走 git 协议复用系统凭据（私有库免 token），传输完整性由 git 对象哈希保证，无需额外 HTTP 库
 static const wchar_t UPDATE_REPO_URL[] = L"http://192.168.1.119:3000/OTHER/GitMenuTool.git";
@@ -2644,12 +2644,8 @@ static LRESULT CALLBACK LeftPanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 static HWND g_topStatics[2];
-static HWND g_titleText = nullptr;                          // 标题条内标题/版本文字
 static void BuildControls() {
-    // 子标题栏（系统标题栏保留）：标题/版本 + 检查更新，位于系统标题栏正下方
-    g_titleText = CreateWindowExW(0, L"STATIC", (std::wstring(APP_TITLE) + L" " + APP_VERSION).c_str(),
-                                  WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main, nullptr, g_hInst, nullptr);
-    SendMessageW(g_titleText, WM_SETFONT, (WPARAM)g_fontUIBold, TRUE);
+    // 子标题栏（系统标题栏保留）：检查更新，位于系统标题栏正下方
     MkBtn(g_main, L"检查更新", IDC_CHECKUPD, 0, 0, 0, 0, g_fontUI);   // 在线升级手动入口（子标题栏内）
     // 顶栏（两个 STATIC 已在 WinMain 创建，这里只建输入框与按钮）
     g_editDir = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
@@ -2702,22 +2698,10 @@ static void Layout() {
     int rowH = (int)(30 * g_scale);
     int statH = (int)(150 * g_scale), cmdH = (int)(28 * g_scale);
     int leftW = (int)(200 * g_scale);
-    // 子标题栏：标题/版本 + 检查更新（系统标题栏在窗口最上方，此行在其正下方）
+    // 子标题栏：检查更新（系统标题栏在窗口最上方，此行在其正下方）
     int stripH = (int)(28 * g_scale);
-    int tx = (int)(16 * g_scale);
-    HDC dcs = GetDC(g_main);
-    HFONT ofs = (HFONT)SelectObject(dcs, g_fontUIBold);
-    SIZE ssz;
-    std::wstring tstr = std::wstring(APP_TITLE) + L" " + APP_VERSION;
-    GetTextExtentPoint32W(dcs, tstr.c_str(), (int)tstr.size(), &ssz);
-    SelectObject(dcs, ofs);
-    ReleaseDC(g_main, dcs);
-    int tH = ssz.cy < stripH ? ssz.cy : stripH;
-    MoveWindow(g_titleText, tx, (stripH - tH) / 2, ssz.cx + (int)(10 * g_scale), tH, TRUE);
-    int ubh = stripH - (int)(8 * g_scale);
-    int ux = tx + ssz.cx + (int)(24 * g_scale);
-    MoveWindow(GetDlgItem(g_main, IDC_CHECKUPD), ux, (stripH - ubh) / 2,
-               (int)(110 * g_scale), ubh, TRUE);
+    MoveWindow(GetDlgItem(g_main, IDC_CHECKUPD), (int)(16 * g_scale), (int)(4 * g_scale),
+               (int)(110 * g_scale), stripH - (int)(8 * g_scale), TRUE);
     // 顶栏：标签宽度按文字实测（DPI 缩放下写死宽度会截断「操作目录:」）；输入框右缘贴「打开」按钮左缘
     int lblX = m + (int)(2 * g_scale), lblW = (int)(64 * g_scale), lblH = 20;
     {
