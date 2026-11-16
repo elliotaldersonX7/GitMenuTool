@@ -52,11 +52,14 @@ namespace fs = std::filesystem;
 #define IDC_OUT       120
 #define IDC_LEFT      121
 #define IDC_CHECKUPD  122
+#define IDC_TBTN_MIN  123
+#define IDC_TBTN_MAX  124
+#define IDC_TBTN_CLOSE 125
 #define IDM_BASE      2000
 
 // ============================ 全局 ==========================================
 static const wchar_t APP_TITLE[] = L"Git 菜单工具 cpp v1";
-static const wchar_t APP_VERSION[] = L"v20261116c";
+static const wchar_t APP_VERSION[] = L"v20261116d";
 // 在线升级：更新源 = 本工具源码仓的同名发布分支（分支名=版本号，分支里只放 GitMenuTool.exe）；
 // 走 git 协议复用系统凭据（私有库免 token），传输完整性由 git 对象哈希保证，无需额外 HTTP 库
 static const wchar_t UPDATE_REPO_URL[] = L"http://192.168.1.119:3000/OTHER/GitMenuTool.git";
@@ -64,6 +67,10 @@ static const wchar_t UPDATE_ASSET[] = L"GitMenuTool.exe";
 static const wchar_t GITEA_HINT[] = L"https://github.com/用户名/仓库名.git";
 static const wchar_t PRETTY[] = L"format:%h %ad%d %s";
 static const wchar_t DATEFMT[] = L"format:%Y-%m-%d %H:%M";
+// 标题条高度：与系统标题栏同高。标准标题栏已由 WM_NCCALCSIZE 去掉（保留系统边框），
+// 由客户区顶部自绘一条标题条替代（图标+标题/版本+检查更新+最小化/最大化/关闭），
+// NCCALCSIZE 与布局共用本函数保证严丝合缝
+static int TitleStripH() { return GetSystemMetrics(SM_CYCAPTION); }
 // 内置 .gitignore 模板（Keil 固件项目通用规则）
 static const wchar_t* GITIGNORE_TEMPLATE =
 LR"(# ===== Keil MDK 编译产物 =====
@@ -2644,7 +2651,23 @@ static LRESULT CALLBACK LeftPanelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 static HWND g_topStatics[2];
+static HWND g_titleIcon = nullptr, g_titleText = nullptr;   // 标题条内图标与标题/版本文字
 static void BuildControls() {
+    // 标题条（标准标题栏已由 WM_NCCALCSIZE 去掉）：图标 + 标题/版本 + 检查更新 + 最小化/最大化/关闭
+    wchar_t exeB[MAX_PATH]; GetModuleFileNameW(nullptr, exeB, MAX_PATH);
+    HICON hIc = ExtractIconW(g_hInst, exeB, 0);
+    g_titleIcon = CreateWindowExW(0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | SS_ICON,
+                                  0, 0, 0, 0, g_main, nullptr, g_hInst, nullptr);
+    SendMessageW(g_titleIcon, STM_SETICON, (WPARAM)hIc, 0);
+    g_titleText = CreateWindowExW(0, L"STATIC", (std::wstring(APP_TITLE) + L" " + APP_VERSION).c_str(),
+                                  WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main, nullptr, g_hInst, nullptr);
+    MkBtn(g_main, L"检查更新", IDC_CHECKUPD, 0, 0, 0, 0, g_fontUI);   // 在线升级手动入口（标题条内）
+    CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                    0, 0, 0, 0, g_main, (HMENU)IDC_TBTN_MIN, g_hInst, nullptr);
+    CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                    0, 0, 0, 0, g_main, (HMENU)IDC_TBTN_MAX, g_hInst, nullptr);
+    CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                    0, 0, 0, 0, g_main, (HMENU)IDC_TBTN_CLOSE, g_hInst, nullptr);
     // 顶栏（两个 STATIC 已在 WinMain 创建，这里只建输入框与按钮）
     g_editDir = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                 0, 0, 0, 0, g_main, (HMENU)IDC_DIR, g_hInst, nullptr);
@@ -2660,7 +2683,6 @@ static void BuildControls() {
     MkBtn(g_main, L"⤓ 一键配置ignore", IDC_IGNORE, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L">_ 打开 .gitignore", IDC_OPENIGN, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"清空Git重来", IDC_RESET, 0, 0, 0, 0, g_fontUI);
-    MkBtn(g_main, L"↻ 检查更新", IDC_CHECKUPD, 0, 0, 0, 0, g_fontUI);   // 在线升级手动入口（顶栏）
     // 状态卡（RichEdit）+ 输出区（自绘黑底日志）
     g_stat = NewRich(g_main, (HMENU)IDC_STAT, RGB(0xff, 0xff, 0xff));
     g_out  = CreateWindowExW(0, L"GIT_OUT", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL,
@@ -2694,9 +2716,30 @@ static void Layout() {
     RECT rc; GetClientRect(g_main, &rc);
     int W = rc.right, H = rc.bottom;
     int m = (int)(6 * g_scale);
-    int topH = (int)(32 * g_scale), rowH = (int)(30 * g_scale);
+    int topH = TitleStripH(), rowH = (int)(30 * g_scale);
     int statH = (int)(150 * g_scale), cmdH = (int)(28 * g_scale);
     int leftW = (int)(200 * g_scale);
+    // 标题条：图标 + 标题/版本 + 检查更新 …右侧 最小化/最大化/关闭（宽高取系统标题栏规格）
+    int stripH = TitleStripH();
+    int capBtnW = GetSystemMetrics(SM_CXSIZE);
+    int sx = (int)(10 * g_scale);
+    MoveWindow(g_titleIcon, sx, 0, capBtnW, stripH, TRUE);
+    int tx = sx + capBtnW + (int)(6 * g_scale);
+    HDC dcs = GetDC(g_main);
+    HFONT ofs = (HFONT)SelectObject(dcs, g_fontUIBold);
+    SIZE ssz;
+    std::wstring tstr = std::wstring(APP_TITLE) + L" " + APP_VERSION;
+    GetTextExtentPoint32W(dcs, tstr.c_str(), (int)tstr.size(), &ssz);
+    SelectObject(dcs, ofs);
+    ReleaseDC(g_main, dcs);
+    MoveWindow(g_titleText, tx, 0, ssz.cx + (int)(8 * g_scale), stripH, TRUE);
+    int ux = tx + ssz.cx + (int)(16 * g_scale);
+    MoveWindow(GetDlgItem(g_main, IDC_CHECKUPD), ux, (stripH - (int)(24 * g_scale)) / 2,
+               (int)(88 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(GetDlgItem(g_main, IDC_TBTN_MIN), W - 3 * capBtnW, 0, capBtnW, stripH, TRUE);
+    MoveWindow(GetDlgItem(g_main, IDC_TBTN_MAX), W - 2 * capBtnW, 0, capBtnW, stripH, TRUE);
+    MoveWindow(GetDlgItem(g_main, IDC_TBTN_CLOSE), W - capBtnW, 0, capBtnW, stripH, TRUE);
+    InvalidateRect(GetDlgItem(g_main, IDC_TBTN_MAX), nullptr, FALSE);   // 最大化/还原图标随窗口状态重绘
     // 顶栏：标签宽度按文字实测（DPI 缩放下写死宽度会截断「操作目录:」）；输入框右缘贴「打开」按钮左缘
     int lblX = m + (int)(2 * g_scale), lblW = (int)(64 * g_scale), lblH = 20;
     {
@@ -2709,16 +2752,16 @@ static void Layout() {
         lblW = sz0.cx + (int)(8 * g_scale);
         lblH = sz0.cy + 6;
     }
-    MoveWindow(g_topStatics[0], lblX, m + 5, lblW, lblH, TRUE);
+    MoveWindow(g_topStatics[0], lblX, stripH + m + 5, lblW, lblH, TRUE);
     int entryX = lblX + lblW + (int)(4 * g_scale);
     int entryR = W - (int)(308 * g_scale) - (int)(8 * g_scale);   /* 「打开」按钮左缘留 8px */
     if (entryR < entryX + (int)(120 * g_scale)) entryR = entryX + (int)(120 * g_scale);
-    MoveWindow(g_editDir, entryX, m, entryR - entryX, (int)(24 * g_scale), TRUE);
+    MoveWindow(g_editDir, entryX, stripH + m, entryR - entryX, (int)(24 * g_scale), TRUE);
     // 打开 / 清空输出 / 克隆仓库 放右端
     HWND open = GetDlgItem(g_main, IDC_PICKDIR), clear = GetDlgItem(g_main, IDC_CLEAROUT), clone = GetDlgItem(g_main, IDM_CLONE);
-    MoveWindow(open, W - (int)(308 * g_scale), m, (int)(64 * g_scale), (int)(24 * g_scale), TRUE);
-    MoveWindow(clear, W - (int)(236 * g_scale), m, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
-    MoveWindow(clone, W - (int)(138 * g_scale), m, (int)(86 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(open, W - (int)(308 * g_scale), stripH + m, (int)(64 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(clear, W - (int)(236 * g_scale), stripH + m, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(clone, W - (int)(138 * g_scale), stripH + m, (int)(86 * g_scale), (int)(24 * g_scale), TRUE);
     // 左栏
     MoveWindow(g_leftPanel, 0, topH + m, leftW, H - topH - m, TRUE);
     UpdateLeftScroll(g_leftPanel);
@@ -2731,12 +2774,12 @@ static void Layout() {
     int rightX = leftW + m, rightW = W - rightX - m;
     // 状态按钮行：宽度按文字实测分配，避免小字被截断
     int y = topH + m;
-    int idsSbar[7] = { IDC_REFRESH, IDC_GLOBALCFG, IDC_INIT, IDC_IGNORE, IDC_OPENIGN, IDC_RESET, IDC_CHECKUPD };
-    int wtxt[7]; int total = 0;
+    int idsSbar[6] = { IDC_REFRESH, IDC_GLOBALCFG, IDC_INIT, IDC_IGNORE, IDC_OPENIGN, IDC_RESET };
+    int wtxt[6]; int total = 0;
     HDC dc = GetDC(g_main);
     HFONT of = (HFONT)SelectObject(dc, g_fontUI);
     SIZE sz;
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < 6; ++i) {
         wchar_t t[64]; GetDlgItemTextW(g_main, idsSbar[i], t, 64);
         GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
         wtxt[i] = sz.cx + (int)(22 * g_scale);
@@ -2744,11 +2787,11 @@ static void Layout() {
     }
     SelectObject(dc, of);
     ReleaseDC(g_main, dc);
-    total += 6 * (int)(4 * g_scale);
+    total += 5 * (int)(4 * g_scale);
     int avail = rightW - (int)(8 * g_scale);
     double fit = total > avail ? (double)avail / total : 1.0;
     int x2 = rightX;
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < 6; ++i) {
         int w2 = (int)(wtxt[i] * fit) - (int)(4 * g_scale);
         MoveWindow(GetDlgItem(g_main, idsSbar[i]), x2, y, w2, rowH, TRUE);
         x2 += w2 + (int)(4 * g_scale);
@@ -2784,6 +2827,56 @@ static void RenderStatus(std::vector<std::vector<Seg>>* lines) {
 // ============================ 主窗口过程 ====================================
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
+    case WM_NCCALCSIZE:
+        // 去掉标准标题栏但保留系统边框：客户区顶边上移一个标题高度，标题条改由客户区自绘
+        if (w) {
+            LRESULT r = DefWindowProcW(h, m, w, l);
+            ((RECT*)l)->top -= TitleStripH();
+            return r;
+        }
+        return DefWindowProcW(h, m, w, l);
+    case WM_NCHITTEST: {
+        LRESULT r = DefWindowProcW(h, m, w, l);
+        if (r == HTCLIENT) {   // 标题条空域当作标题：可拖拽/双击最大化/右键系统菜单（子控件各自命中，不会走到这里）
+            POINT pt = { (short)LOWORD(l), (short)HIWORD(l) };
+            RECT rcs; GetWindowRect(h, &rcs);
+            if (pt.y - rcs.top < TitleStripH()) return HTCAPTION;
+        }
+        return r;
+    }
+    case WM_DRAWITEM: {
+        // 标题条最小化/最大化/关闭自绘（系统标题栏已去掉，三键由客户区绘制、点击走 SC_ 命令）
+        DRAWITEMSTRUCT* d = (DRAWITEMSTRUCT*)l;
+        if (d->CtlID == IDC_TBTN_MIN || d->CtlID == IDC_TBTN_MAX || d->CtlID == IDC_TBTN_CLOSE) {
+            HDC dc = d->hDC;
+            FillRect(dc, &d->rcItem, GetSysColorBrush(COLOR_WINDOW));
+            HPEN pen = CreatePen(PS_SOLID, g_scale >= 1.5 ? 2 : 1, RGB(0x60, 0x60, 0x60));
+            HPEN op = (HPEN)SelectObject(dc, pen);
+            HBRUSH ob = (HBRUSH)SelectObject(dc, GetStockObject(NULL_BRUSH));
+            int cx = (d->rcItem.left + d->rcItem.right) / 2, cy = (d->rcItem.top + d->rcItem.bottom) / 2;
+            int r5 = (int)(5 * g_scale);
+            if (d->CtlID == IDC_TBTN_MIN) {
+                MoveToEx(dc, cx - r5, cy + r5 / 2, nullptr); LineTo(dc, cx + r5, cy + r5 / 2);
+            } else if (d->CtlID == IDC_TBTN_MAX) {
+                if (IsZoomed(h)) {   // 已最大化画"还原"：后置矩形两条边 + 前置矩形
+                    MoveToEx(dc, cx - r5 + 2, cy - r5 + 2, nullptr);
+                    LineTo(dc, cx + r5 + 2, cy - r5 + 2); LineTo(dc, cx + r5 + 2, cy + r5 - 2);
+                    Rectangle(dc, cx - r5, cy - r5 + 2, cx + r5 - 2, cy + r5 + 2);
+                    Rectangle(dc, cx - r5, cy - r5, cx + r5 - 2, cy + r5 - 2);
+                } else {
+                    Rectangle(dc, cx - r5, cy - r5, cx + r5, cy + r5);
+                }
+            } else {
+                MoveToEx(dc, cx - r5, cy - r5, nullptr); LineTo(dc, cx + r5, cy + r5);
+                MoveToEx(dc, cx + r5, cy - r5, nullptr); LineTo(dc, cx - r5, cy + r5);
+            }
+            SelectObject(dc, ob);
+            SelectObject(dc, op);
+            DeleteObject(pen);
+            return TRUE;
+        }
+        break;
+    }
     case WM_SIZE:
         Layout();
         return 0;
@@ -2803,7 +2896,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id == IDC_IGNORE) { OpIgnoreCfg(); return 0; }
         if (id == IDC_OPENIGN) { OpOpenIgnore(); return 0; }
         if (id == IDC_RESET) { OpResetGit(); return 0; }
-        if (id == IDC_CHECKUPD) { OpCheckUpdate(); return 0; }   // 顶栏【检查更新】（在线升级手动入口）
+        if (id == IDC_CHECKUPD) { OpCheckUpdate(); return 0; }   // 标题条【检查更新】（在线升级手动入口）
+        if (id == IDC_TBTN_MIN) { PostMessageW(h, WM_SYSCOMMAND, SC_MINIMIZE, 0); return 0; }
+        if (id == IDC_TBTN_MAX) { PostMessageW(h, WM_SYSCOMMAND, IsZoomed(h) ? SC_RESTORE : SC_MAXIMIZE, 0); return 0; }
+        if (id == IDC_TBTN_CLOSE) { PostMessageW(h, WM_CLOSE, 0, 0); return 0; }
         if (id == IDM_CLONE) { OpClone(); return 0; }
         if (id >= IDM_BASE && id < IDM_BASE + 100) {
             for (auto& cat : MENU)
@@ -2862,8 +2958,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         } else if (ui->manual) {
             Info(parent, L"当前已是最新版本 " + ui->curVer + L"。");
         }
-        HWND hTopBtn = GetDlgItem(g_main, IDC_CHECKUPD);   // 顶栏按钮复位
-        if (hTopBtn) { EnableWindow(hTopBtn, TRUE); SetWindowTextW(hTopBtn, L"↻ 检查更新"); }
+        HWND hTopBtn = GetDlgItem(g_main, IDC_CHECKUPD);   // 标题条按钮复位
+        if (hTopBtn) { EnableWindow(hTopBtn, TRUE); SetWindowTextW(hTopBtn, L"检查更新"); }
         delete ui;
         return 0;
     }
