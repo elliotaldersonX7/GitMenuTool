@@ -153,6 +153,7 @@ static WNDPROC g_dirEditProc = nullptr, g_cmdEditProc = nullptr;
 static double g_scale = 1.0;
 
 static std::wstring g_git, g_repo, g_remote, g_statUrl;
+static std::wstring g_repoTag;            // 标题栏版本：当前仓库的 git 标签原文（区分大小写，HEAD 无精确标签时就近取）
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
 static int g_flowBlock = -1;              // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；-1=流程完成。④远端+首推为可选环节，不产生卡点）
@@ -1342,6 +1343,7 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     if (g_repo.empty()) {
         lines->push_back({ SegT(L"（未选定仓库目录，请先在顶部选定并打开）", STAT_RED) });
         g_flowBlock = -1;
+        g_repoTag.clear();   // 未选仓库：标题栏回退到工具自身版本号
         return lines;
     }
     // ① 全局配置：user.name 与 user.email 均非空才算完成
@@ -1352,6 +1354,7 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     struct PillS { const wchar_t* name; bool ok; bool optional; };
     if (!s0 || !inRepo) {
         g_flowBlock = !s0 ? 0 : 1;   // ①②未完成：左侧栏整体置灰禁点（全局配置/初始化均可在顶栏完成）
+        g_repoTag.clear();   // 不是有效仓库：标题栏回退到工具自身版本号
         PillS pills[5] = { { L"① 全局配置", s0, false }, { L"② 初始化仓库", inRepo, false },
                            { L"③ 配置ignore", false, false }, { L"④ 首次提交", false, false },
                            { L"⑤ 远端+首推(可选)", false, true } };
@@ -1370,6 +1373,9 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     g_remote = DetectRemote();
     std::wstring branch = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"HEAD" }));
     if (branch.empty()) branch = L"（空）";
+    // 标题栏版本：优先取 HEAD 上的精确标签；没有时就近标签兜底。标签文本原样显示（区分大小写），仓库无标签时保持原值（回退工具版本号）
+    g_repoTag = Trim(GitOut({ L"describe", L"--tags", L"--exact-match" }));
+    if (g_repoTag.empty()) g_repoTag = Trim(GitOut({ L"describe", L"--tags", L"--abbrev=0" }));
     // ③④⑤ 环节状态
     bool s2 = false, s3 = false, s4 = false;
     std::error_code ec;
@@ -2710,6 +2716,9 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_APP_STATUS:
         g_statusRunning = false;
         RenderStatus((std::vector<std::vector<Seg>>*)w);
+        // 标题栏版本同步：仓库有标签显示标签原文，无标签回退工具自身版本号
+        SetWindowTextW(g_main, (std::wstring(APP_TITLE) + L" " +
+                                (g_repoTag.empty() ? std::wstring(APP_VERSION) : g_repoTag)).c_str());
         InvalidateRect(g_leftPanel, nullptr, FALSE);   // g_flowBlock 可能变化，左栏灰/亮态同步重绘
         return 0;
     case WM_TIMER:
