@@ -352,10 +352,11 @@ static std::wstring GetToolRepoTag() {
     return t;
 }
 // ============================ 检查更新（GitHub Release）======================
-// WinINet 同步 GET（只在后台线程调用）；失败返回空串，不抛错
-static std::string HttpGetUtf8(const std::wstring& url) {
+// WinINet 同步 GET（只在后台线程调用）；proxy=true 走系统代理，false 直连；失败返回空串
+static std::string HttpGetVia(bool useProxy, const std::wstring& url) {
     std::string out;
-    HINTERNET hOpen = InternetOpenW(L"GitMenuTool", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
+    HINTERNET hOpen = InternetOpenW(L"GitMenuTool",
+        useProxy ? INTERNET_OPEN_TYPE_PRECONFIG : INTERNET_OPEN_TYPE_DIRECT, nullptr, nullptr, 0);
     if (!hOpen) return out;
     DWORD t = 15000;   // 连接/发送/接收统一 15 秒超时，GitHub 不通时尽快放弃
     InternetSetOptionW(hOpen, INTERNET_OPTION_CONNECT_TIMEOUT, &t, sizeof(t));
@@ -370,6 +371,14 @@ static std::string HttpGetUtf8(const std::wstring& url) {
     }
     InternetCloseHandle(hOpen);
     return out;
+}
+// 直连优先，内容无效（如代理返回 403/404 错误页，无 tag_name 字段）再走系统代理；都无效返回空
+static std::string HttpGetUtf8(const std::wstring& url) {
+    std::string s = HttpGetVia(false, url);
+    if (s.find("\"tag_name\"") != std::string::npos) return s;
+    s = HttpGetVia(true, url);
+    if (s.find("\"tag_name\"") != std::string::npos) return s;
+    return "";
 }
 // UTF-8 字符串 → 宽字符
 static std::wstring Utf8ToWideRaw(const std::string& s) {
