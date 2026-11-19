@@ -326,6 +326,21 @@ static std::wstring GitOut(const std::vector<std::wstring>& args, DWORD timeoutM
     GitResult r = RunGit(argv, L"", timeoutMs);
     return r.rc == 0 ? r.out : L"";
 }
+// 工具自身代码仓库的标签原文（exe 所在目录即工具代码仓库）：HEAD 精确标签优先，没有时就近标签兜底，无标签返回空
+static std::wstring GetToolRepoTag() {
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::vector<std::wstring> base = { g_git, L"-C", fs::path(exePath).parent_path().wstring(), L"describe", L"--tags" };
+    std::vector<std::wstring> exact = base; exact.push_back(L"--exact-match");
+    GitResult r = RunGit(exact, L"", 10000);
+    std::wstring t = Trim(r.rc == 0 ? r.out : L"");
+    if (t.empty()) {
+        std::vector<std::wstring> fallback = base; fallback.push_back(L"--abbrev=0");   // 只输出就近标签名（不带 -N-gxxxx 后缀）
+        r = RunGit(fallback, L"", 10000);
+        t = Trim(r.rc == 0 ? r.out : L"");
+    }
+    return t;
+}
 // 组装带编码前缀的 git 命令
 static std::vector<std::wstring> G(std::initializer_list<std::wstring> args) {
     std::vector<std::wstring> argv = { g_git, L"-c", L"i18n.logoutputencoding=utf-8" };
@@ -1343,7 +1358,6 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     if (g_repo.empty()) {
         lines->push_back({ SegT(L"（未选定仓库目录，请先在顶部选定并打开）", STAT_RED) });
         g_flowBlock = -1;
-        g_repoTag.clear();   // 未选仓库：标题栏回退到工具自身版本号
         return lines;
     }
     // ① 全局配置：user.name 与 user.email 均非空才算完成
@@ -1354,7 +1368,6 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     struct PillS { const wchar_t* name; bool ok; bool optional; };
     if (!s0 || !inRepo) {
         g_flowBlock = !s0 ? 0 : 1;   // ①②未完成：左侧栏整体置灰禁点（全局配置/初始化均可在顶栏完成）
-        g_repoTag.clear();   // 不是有效仓库：标题栏回退到工具自身版本号
         PillS pills[5] = { { L"① 全局配置", s0, false }, { L"② 初始化仓库", inRepo, false },
                            { L"③ 配置ignore", false, false }, { L"④ 首次提交", false, false },
                            { L"⑤ 远端+首推(可选)", false, true } };
@@ -1373,9 +1386,6 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     g_remote = DetectRemote();
     std::wstring branch = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"HEAD" }));
     if (branch.empty()) branch = L"（空）";
-    // 标题栏版本：优先取 HEAD 上的精确标签；没有时就近标签兜底。标签文本原样显示（区分大小写），仓库无标签时保持原值（回退工具版本号）
-    g_repoTag = Trim(GitOut({ L"describe", L"--tags", L"--exact-match" }));
-    if (g_repoTag.empty()) g_repoTag = Trim(GitOut({ L"describe", L"--tags", L"--abbrev=0" }));
     // ③④⑤ 环节状态
     bool s2 = false, s3 = false, s4 = false;
     std::error_code ec;
@@ -2716,9 +2726,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_APP_STATUS:
         g_statusRunning = false;
         RenderStatus((std::vector<std::vector<Seg>>*)w);
-        // 标题栏版本同步：仓库有标签显示标签原文，无标签回退工具自身版本号
-        SetWindowTextW(g_main, (std::wstring(APP_TITLE) + L" " +
-                                (g_repoTag.empty() ? std::wstring(APP_VERSION) : g_repoTag)).c_str());
         InvalidateRect(g_leftPanel, nullptr, FALSE);   // g_flowBlock 可能变化，左栏灰/亮态同步重绘
         return 0;
     case WM_TIMER:
@@ -2758,6 +2765,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     LoadLibraryW(L"Riched20.dll");   // RichEdit 控件库（RICHEDIT_CLASS）
     g_git = FindExe(L"git");
     if (g_git.empty()) { MessageBoxW(nullptr, L"未检测到 Git，请先安装 Git for Windows。", APP_TITLE, MB_ICONERROR); return 1; }
+    g_repoTag = GetToolRepoTag();   // 标题栏版本：取工具自身代码仓库的 git 标签原文，无标签回退 APP_VERSION
     g_scale = GetDeviceCaps(GetDC(nullptr), LOGPIXELSX) / 96.0;
     g_fontUI = MkFont(10, false, L"Microsoft YaHei UI");
     g_fontUIBold = MkFont(10, true, L"Microsoft YaHei UI");
@@ -2791,7 +2799,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     int x = std::max(0, (GetSystemMetrics(SM_CXSCREEN) - W) / 2);
     int y = std::max(0, (GetSystemMetrics(SM_CYSCREEN) - H) / 2);
     g_main = CreateWindowExW(0, L"GIT_MENU_MAIN",
-                             (std::wstring(APP_TITLE) + L" " + APP_VERSION).c_str(),
+                             (std::wstring(APP_TITLE) + L" " +
+                              (g_repoTag.empty() ? std::wstring(APP_VERSION) : g_repoTag)).c_str(),
                              WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,   // 主窗不擦子控件区，否则白底盖住 RichEdit 黑底
                              x, y, W, H, nullptr, nullptr, hInst, nullptr);
     // 顶栏两个 STATIC（Layout 引用 g_topStatics）
