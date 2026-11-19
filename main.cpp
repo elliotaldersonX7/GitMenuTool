@@ -1332,7 +1332,7 @@ static std::wstring UpdateFoundText(const UpdateResult& r) {
     int lines = 0; size_t cut = 0;
     for (size_t i = 0; i <= body.size(); ++i) {
         if (i == body.size() || body[i] == L'\n') {
-            if (++lines > 15) { body = body.substr(0, cut) + L"\n…（说明过长已截断）"; break; }
+            if (++lines > 4) { body = body.substr(0, cut) + L"…（说明较长已截断，完整内容见发布页）"; break; }
             cut = i + 1;
         }
     }
@@ -1476,8 +1476,8 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
   ******************************************************************************
   */
 static void ShowAboutDialog(const UpdateResult* pre) {
-    int m = (int)(14 * g_scale), btnH = (int)(28 * g_scale);
-    int w = (int)(470 * g_scale), ch = (int)(360 * g_scale);
+    int m = (int)(10 * g_scale), btnH = (int)(26 * g_scale);
+    int w = (int)(300 * g_scale), ch = (int)(210 * g_scale);
     RECT rcFrame = { 0, 0, w, ch };
     AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
     int ww = rcFrame.right - rcFrame.left, wh = rcFrame.bottom - rcFrame.top;
@@ -1489,22 +1489,24 @@ static void ShowAboutDialog(const UpdateResult* pre) {
     HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", L"关于",
         WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, g_main, nullptr, g_hInst, nullptr);
     DWORD stStyle = WS_CHILD | WS_VISIBLE | SS_LEFT;
-    int infoH = (int)(96 * g_scale);
+    int infoH = (int)(58 * g_scale);                     // 工具名/版本/作者 3 行
+    int y1 = ch - m - 2 * btnH - (int)(4 * g_scale);     // 按钮行1：检查更新/一键升级
+    int y2 = ch - m - btnH;                              // 按钮行2：打开发布页/关闭
     HWND hInfo = CreateWindowExW(0, L"STATIC",
         (std::wstring(APP_TITLE) + L"\n当前版本：" + CurAppVersion() + L"\n作者：" + APP_AUTHOR).c_str(),
         stStyle, m, m, w - 2 * m, infoH, dlg, (HMENU)IDC_ABOUT_INFO, g_hInst, nullptr);
     HWND hStatus = CreateWindowExW(0, L"STATIC",
         L"启动及运行期间每 10 分钟会自动检查更新；\n也可点下方按钮手动检查。",
-        stStyle, m, m + infoH, w - 2 * m, ch - 2 * m - infoH - 2 * btnH, dlg, (HMENU)IDC_ABOUT_STATUS, g_hInst, nullptr);
-    int bw = (int)(95 * g_scale), by = ch - m - btnH;
+        stStyle, m, m + infoH, w - 2 * m, y1 - (m + infoH) - (int)(4 * g_scale), dlg, (HMENU)IDC_ABOUT_STATUS, g_hInst, nullptr);
+    int bw = (int)(95 * g_scale);
     HWND hCheck = CreateWindowExW(0, L"BUTTON", L"检查更新", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        m, by, bw, btnH, dlg, (HMENU)IDC_ABOUT_CHECK, g_hInst, nullptr);
+        m, y1, bw, btnH, dlg, (HMENU)IDC_ABOUT_CHECK, g_hInst, nullptr);
     HWND hUpgrade = CreateWindowExW(0, L"BUTTON", L"一键升级", WS_CHILD,   // 发现新版才显示
-        m + bw + (int)(8 * g_scale), by, bw, btnH, dlg, (HMENU)IDC_ABOUT_UPGRADE, g_hInst, nullptr);
+        m + bw + (int)(6 * g_scale), y1, bw, btnH, dlg, (HMENU)IDC_ABOUT_UPGRADE, g_hInst, nullptr);
     HWND hPage = CreateWindowExW(0, L"BUTTON", L"打开发布页", WS_CHILD,   // 发现新版才显示
-        m + 2 * (bw + (int)(8 * g_scale)), by, bw, btnH, dlg, (HMENU)IDC_ABOUT_PAGE, g_hInst, nullptr);
+        m, y2, bw, btnH, dlg, (HMENU)IDC_ABOUT_PAGE, g_hInst, nullptr);
     HWND hClose = CreateWindowExW(0, L"BUTTON", L"关闭", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-        w - m - bw, by, bw, btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
+        w - m - bw, y2, bw, btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
     SendMessageW(hInfo, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hStatus, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hCheck, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
