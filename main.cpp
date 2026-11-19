@@ -58,6 +58,7 @@ namespace fs = std::filesystem;
 #define IDC_ABOUT_PAGE  3002
 #define IDC_ABOUT_INFO  3003
 #define IDC_ABOUT_STATUS 3004
+#define IDC_ABOUT_UPGRADE 3005
 #define IDM_BASE      2000
 
 // ============================ 全局 ==========================================
@@ -372,12 +373,20 @@ static std::string HttpGetVia(bool useProxy, const std::wstring& url) {
     InternetCloseHandle(hOpen);
     return out;
 }
-// 直连优先，内容无效（如代理返回 403/404 错误页，无 tag_name 字段）再走系统代理；都无效返回空
+// 检查更新取 JSON：直连优先，内容无 "tag_name" 字段（403/404 错误页）再走系统代理；都无效返回空
 static std::string HttpGetUtf8(const std::wstring& url) {
     std::string s = HttpGetVia(false, url);
     if (s.find("\"tag_name\"") != std::string::npos) return s;
     s = HttpGetVia(true, url);
     if (s.find("\"tag_name\"") != std::string::npos) return s;
+    return "";
+}
+// 下载 exe 二进制：直连优先（>100KB 视为有效，错误页只有几百字节），无效再走系统代理
+static std::string HttpDownload(const std::wstring& url) {
+    std::string s = HttpGetVia(false, url);
+    if (s.size() > 100 * 1024) return s;
+    s = HttpGetVia(true, url);
+    if (s.size() > 100 * 1024) return s;
     return "";
 }
 // UTF-8 字符串 → 宽字符
@@ -427,6 +436,21 @@ static std::wstring JsonUnescape(std::wstring s) {
         }
     }
     return out;
+}
+// 取 assets 里第一个 .exe 附件的下载地址（附件名带不带版本都可以，最终都会改名顶位）
+static std::wstring JsonGetAssetExe(const std::string& json) {
+    const std::string key = "\"browser_download_url\":\"";
+    size_t p = 0;
+    while ((p = json.find(key, p)) != std::string::npos) {
+        p += key.size();
+        size_t e = json.find('"', p);
+        if (e == std::string::npos) break;
+        std::string url = json.substr(p, e - p);
+        if (url.size() > 4 && (url.compare(url.size() - 4, 4, ".exe") == 0 || url.compare(url.size() - 4, 4, ".EXE") == 0))
+            return Utf8ToWideRaw(url);
+        p = e + 1;
+    }
+    return L"";
 }
 // 版本号比较：去 v/V 前缀后按 '.' 分段取数字逐段比较，缺段按 0；返回 >0=a新 <0=b新 0=相同
 // 字母后缀忽略（v1.1a 视作 v1.1；v20261117a 整段数字 20261117）
@@ -999,6 +1023,7 @@ static const UINT WM_APP_JOBMSG  = WM_APP + 1;                      // wParam=Jo
 static const UINT WM_APP_JOBDONE = WM_APP + 2;
 static const UINT WM_APP_STATUS  = WM_APP + 3;                      // wParam=segments(堆)
 static const UINT WM_APP_UPDATE  = WM_APP + 4;                      // wParam=UpdateResult*(堆) lParam=1自动/0手动
+static const UINT WM_APP_UPGRADE = WM_APP + 5;                      // wParam=UpgradeResult*(堆)
 // 单任务串行：逐条执行，非 optional 失败即中止；SPECIAL 命令见 HandleSpecial
 static void HandleSpecial(const std::vector<std::wstring>& argv);
 static void ExecAsync(std::vector<JobCmd> cmds) {
@@ -1268,6 +1293,7 @@ static std::optional<std::pair<std::wstring, std::wstring>> AskText2(HWND parent
 struct UpdateResult {
     int kind = 2;                  // 0=有新版 1=已最新 2=网络失败
     std::wstring tag, notes;       // 最新版本标签 / 发布说明（已还原转义）
+    std::wstring exeUrl;           // assets 里 exe 附件直链（kind=0 时有效）
 };
 static HWND g_hAboutDlg = nullptr;          // 关于弹窗（开着时检查结果写回弹窗）
 static std::atomic<bool> g_updateRunning{ false };
@@ -1293,6 +1319,7 @@ static void CheckUpdateAsync(bool autoMode) {
             r->tag = tag;
             r->notes = JsonUnescape(JsonGetStringRaw(json, "body"));
             r->kind = VersionCompare(tag, CurAppVersion()) > 0 ? 0 : 1;
+            if (r->kind == 0) r->exeUrl = JsonGetAssetExe(json);
         }   // 其余保持 kind=2（网络失败）
         PostMessageW(g_main, WM_APP_UPDATE, (WPARAM)r, (LPARAM)(autoMode ? 1 : 0));
         g_updateRunning = false;   // 线程内清零：自动弹窗的模态循环会卡住 handler，清零不能放 handler 里
@@ -1310,6 +1337,87 @@ static std::wstring UpdateFoundText(const UpdateResult& r) {
         }
     }
     return s + body;
+}
+// ============================ 一键升级（下载+换身）===========================
+struct UpgradeResult {
+    bool ok = false;
+    std::wstring msg;              // ok=新 exe 临时文件路径；!ok=失败原因
+};
+static std::wstring g_upgradeExeUrl;   // 当前发现的新版 exe 附件直链（弹窗一键升级用）
+static std::atomic<bool> g_upgrading{ false };
+/**
+  ******************************************************************************
+  * @brief    后台线程下载新版本 exe 到 %TEMP%
+  * @param    url exe 附件直链（调用前应确认 g_updateRunning 已被本函数占用）
+  * @retval   None
+  * @note     结果经 WM_APP_UPGRADE 投递主线程执行换身；>100KB 防把错误页当 exe
+  ******************************************************************************
+  */
+static void DownloadAsync(const std::wstring& url) {
+    std::thread([url]() {
+        auto* ur = new UpgradeResult();
+        std::string data = HttpDownload(url);
+        if (data.size() > 100 * 1024) {   // exe 至少几百 KB，防 403/404 错误页被误存
+            wchar_t tmp[MAX_PATH] = {};
+            GetTempPathW(MAX_PATH, tmp);
+            fs::path f = fs::path(tmp) / L"GitMenuTool_upgrade.exe";
+            std::error_code ec;
+            fs::remove(f, ec);
+            std::ofstream ofs(f, std::ios::binary | std::ios::trunc);
+            ofs.write(data.data(), (std::streamsize)data.size());
+            ofs.close();
+            if (fs::exists(f, ec) && fs::file_size(f, ec) == data.size()) { ur->ok = true; ur->msg = f.wstring(); }
+        }
+        if (!ur->ok) ur->msg = L"下载失败或文件不完整，请检查网络后重试";
+        PostMessageW(g_main, WM_APP_UPGRADE, (WPARAM)ur, 0);
+        g_updateRunning = false;   // 与检查共用防重入标志，线程末尾清零（同已知教训）
+    }).detach();
+}
+/**
+  ******************************************************************************
+  * @brief    换身：当前 exe 改名 .old 让位 → 新 exe 顶上原位 → 延迟删 .old → 重启新 exe
+  * @param    tmpExe 已下载的新版本 exe 临时路径
+  * @retval   空串=成功已安排重启；否则返回失败原因（.old 已回滚原名）
+  * @note     Windows 允许改名运行中的 exe；跨卷移动需 MOVEFILE_COPY_ALLOWED；
+  *           杀软可能短暂锁文件，各步 5 次×300ms 重试
+  ******************************************************************************
+  */
+static std::wstring DoUpgradeSwap(const std::wstring& tmpExe) {
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    fs::path cur(exePath), oldf = cur; oldf.replace_extension(L".old");
+    std::error_code ec;
+    fs::remove(oldf, ec);   // 清掉历史 .old
+    bool ok = false;
+    for (int i = 0; i < 5 && !ok; ++i) {   // ① 当前 exe 让位（运行中允许改名）
+        ok = MoveFileExW(cur.c_str(), oldf.c_str(), MOVEFILE_COPY_ALLOWED);
+        if (!ok) Sleep(300);
+    }
+    if (!ok) return L"无法让位当前 exe（可能被杀毒软件锁定），请手动关闭工具后替换";
+    ok = false;
+    for (int i = 0; i < 5 && !ok; ++i) {   // ② 新 exe 顶上原位（%TEMP% 与工具目录跨卷时走复制语义）
+        ok = MoveFileExW(tmpExe.c_str(), cur.c_str(), MOVEFILE_COPY_ALLOWED);
+        if (!ok) Sleep(300);
+    }
+    if (!ok) {   // 回滚：把 .old 改回原名，工具不受影响
+        MoveFileExW(oldf.c_str(), cur.c_str(), MOVEFILE_COPY_ALLOWED);
+        return L"新版本文件就位失败，已恢复原版本";
+    }
+    // ③ 延迟 2 秒删除 .old（当前进程还占着映像）
+    STARTUPINFOW si = { sizeof(si) }; si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+    std::wstring args = L"cmd.exe /c timeout /t 2 /nobreak >nul & del /f \"" + oldf.wstring() + L"\"";
+    CreateProcessW(nullptr, args.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                   nullptr, cur.parent_path().wstring().c_str(), &si, &pi);
+    if (pi.hProcess) CloseHandle(pi.hProcess);
+    if (pi.hThread) CloseHandle(pi.hThread);
+    // ④ 启动新版本
+    si = { sizeof(si) };
+    CreateProcessW(cur.c_str(), nullptr, nullptr, nullptr, FALSE, 0,
+                   nullptr, cur.parent_path().wstring().c_str(), &si, &pi);
+    if (pi.hProcess) CloseHandle(pi.hProcess);
+    if (pi.hThread) CloseHandle(pi.hThread);
+    return L"";
 }
 /**
   ******************************************************************************
@@ -1334,6 +1442,16 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
         }
         if (id == IDC_ABOUT_PAGE) {
             ShellExecuteW(nullptr, L"open", UPDATE_RELEASE_PAGE, nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
+        }
+        if (id == IDC_ABOUT_UPGRADE) {
+            if (g_upgradeExeUrl.empty()) return 0;
+            if (MessageBoxW(h, L"将下载新版本并自动重启工具（旧版保留为 GitMenuTool_old.exe）。\n若杀毒软件拦截 exe 替换，请选择允许后重试。\n\n继续升级？",
+                            L"一键升级", MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return 0;
+            EnableWindow(GetDlgItem(h, IDC_ABOUT_UPGRADE), FALSE);
+            EnableWindow(GetDlgItem(h, IDC_ABOUT_CHECK), FALSE);
+            SetDlgItemTextW(h, IDC_ABOUT_STATUS, L"正在下载新版本，请稍候…（完成后工具会自动重启）");
+            DownloadAsync(g_upgradeExeUrl);
             return 0;
         }
         if (id == IDCANCEL) { st->done = true; DestroyWindow(h); return 0; }
@@ -1378,21 +1496,26 @@ static void ShowAboutDialog(const UpdateResult* pre) {
     HWND hStatus = CreateWindowExW(0, L"STATIC",
         L"启动及运行期间每 10 分钟会自动检查更新；\n也可点下方按钮手动检查。",
         stStyle, m, m + infoH, w - 2 * m, ch - 2 * m - infoH - 2 * btnH, dlg, (HMENU)IDC_ABOUT_STATUS, g_hInst, nullptr);
-    int bw = (int)(110 * g_scale), by = ch - m - btnH;
+    int bw = (int)(95 * g_scale), by = ch - m - btnH;
     HWND hCheck = CreateWindowExW(0, L"BUTTON", L"检查更新", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         m, by, bw, btnH, dlg, (HMENU)IDC_ABOUT_CHECK, g_hInst, nullptr);
-    HWND hPage = CreateWindowExW(0, L"BUTTON", L"打开发布页", WS_CHILD,   // 有新版才显示
-        m + bw + (int)(8 * g_scale), by, bw, btnH, dlg, (HMENU)IDC_ABOUT_PAGE, g_hInst, nullptr);
+    HWND hUpgrade = CreateWindowExW(0, L"BUTTON", L"一键升级", WS_CHILD,   // 发现新版才显示
+        m + bw + (int)(8 * g_scale), by, bw, btnH, dlg, (HMENU)IDC_ABOUT_UPGRADE, g_hInst, nullptr);
+    HWND hPage = CreateWindowExW(0, L"BUTTON", L"打开发布页", WS_CHILD,   // 发现新版才显示
+        m + 2 * (bw + (int)(8 * g_scale)), by, bw, btnH, dlg, (HMENU)IDC_ABOUT_PAGE, g_hInst, nullptr);
     HWND hClose = CreateWindowExW(0, L"BUTTON", L"关闭", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
         w - m - bw, by, bw, btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
     SendMessageW(hInfo, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hStatus, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hCheck, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hUpgrade, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hPage, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hClose, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     if (pre && pre->kind == 0) {   // 自动检测到新版弹出：状态区直接显示结果
         std::wstring txt = UpdateFoundText(*pre);
         SetWindowTextW(hStatus, txt.c_str());
+        g_upgradeExeUrl = pre->exeUrl;
+        ShowWindow(hUpgrade, SW_SHOW);
         ShowWindow(hPage, SW_SHOW);
     }
     SetWindowSubclass(dlg, AboutDlgSub, 1, (DWORD_PTR)&st);
@@ -3000,9 +3123,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             std::wstring found;
             if (r->kind == 0) {
                 found = UpdateFoundText(*r);
+                g_upgradeExeUrl = r->exeUrl;   // 一键升级用的附件直链
                 ShowWindow(GetDlgItem(g_hAboutDlg, IDC_ABOUT_PAGE), SW_SHOW);
+                ShowWindow(GetDlgItem(g_hAboutDlg, IDC_ABOUT_UPGRADE), SW_SHOW);
                 txt = found.c_str();
             } else if (r->kind == 1) {
+                g_upgradeExeUrl.clear();
                 txt = L"已是最新版本 ✓";
             } else {
                 txt = L"检查失败：无法连接更新服务器（或仓库暂无发布版本）。\n请确认电脑可以上网后，再点一次【检查更新】。";
@@ -3014,6 +3140,31 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             ShowAboutDialog(r);
         }
         delete r;
+        return 0;
+    }
+    case WM_APP_UPGRADE: {
+        // 一键升级结果：ok 时 msg=新 exe 临时路径 → 换身 + 自动重启；失败显示原因
+        UpgradeResult* ur = (UpgradeResult*)w;
+        if (ur->ok) {
+            std::wstring err = DoUpgradeSwap(ur->msg);
+            if (err.empty()) {
+                ExitProcess(0);   // 新 exe 已启动。不能依赖 WM_CLOSE/PostQuitMessage：自动弹窗的嵌套模态循环会吞掉唯一一条 WM_QUIT，外层消息循环收不到、进程退不掉
+            }
+            if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
+                std::wstring t = L"升级失败：" + err + L"\n可点【打开发布页】手动下载安装。";
+                SetDlgItemTextW(g_hAboutDlg, IDC_ABOUT_STATUS, t.c_str());
+                EnableWindow(GetDlgItem(g_hAboutDlg, IDC_ABOUT_CHECK), TRUE);
+                EnableWindow(GetDlgItem(g_hAboutDlg, IDC_ABOUT_UPGRADE), TRUE);
+            }
+        } else {
+            if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
+                std::wstring t = L"升级失败：" + ur->msg + L"\n可点【打开发布页】手动下载安装。";
+                SetDlgItemTextW(g_hAboutDlg, IDC_ABOUT_STATUS, t.c_str());
+                EnableWindow(GetDlgItem(g_hAboutDlg, IDC_ABOUT_CHECK), TRUE);
+                EnableWindow(GetDlgItem(g_hAboutDlg, IDC_ABOUT_UPGRADE), TRUE);
+            }
+        }
+        delete ur;
         return 0;
     }
     case WM_TIMER:
