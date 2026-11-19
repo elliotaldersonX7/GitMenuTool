@@ -20,6 +20,7 @@
 #include <commdlg.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <wininet.h>
 #include <string>
 #include <vector>
 #include <optional>
@@ -51,11 +52,20 @@ namespace fs = std::filesystem;
 #define IDC_STAT      119
 #define IDC_OUT       120
 #define IDC_LEFT      121
+#define IDC_ABOUT     122
+// 关于弹窗内部控件 id
+#define IDC_ABOUT_CHECK 3001
+#define IDC_ABOUT_PAGE  3002
+#define IDC_ABOUT_INFO  3003
+#define IDC_ABOUT_STATUS 3004
 #define IDM_BASE      2000
 
 // ============================ 全局 ==========================================
 static const wchar_t APP_TITLE[] = L"Git 菜单工具";
 static const wchar_t APP_VERSION[] = L"v20261117a";
+static const wchar_t APP_AUTHOR[] = L"liuaolin";
+static const wchar_t UPDATE_API_URL[] = L"https://api.github.com/repos/elliotaldersonx0/GitMenuTool/releases/latest";
+static const wchar_t UPDATE_RELEASE_PAGE[] = L"https://github.com/elliotaldersonx0/GitMenuTool/releases";
 static const wchar_t GITEA_HINT[] = L"https://github.com/用户名/仓库名.git";
 static const wchar_t PRETTY[] = L"format:%h %ad%d %s";
 static const wchar_t DATEFMT[] = L"format:%Y-%m-%d %H:%M";
@@ -340,6 +350,100 @@ static std::wstring GetToolRepoTag() {
         t = Trim(r.rc == 0 ? r.out : L"");
     }
     return t;
+}
+// ============================ 检查更新（GitHub Release）======================
+// WinINet 同步 GET（只在后台线程调用）；失败返回空串，不抛错
+static std::string HttpGetUtf8(const std::wstring& url) {
+    std::string out;
+    HINTERNET hOpen = InternetOpenW(L"GitMenuTool", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
+    if (!hOpen) return out;
+    DWORD t = 15000;   // 连接/发送/接收统一 15 秒超时，GitHub 不通时尽快放弃
+    InternetSetOptionW(hOpen, INTERNET_OPTION_CONNECT_TIMEOUT, &t, sizeof(t));
+    InternetSetOptionW(hOpen, INTERNET_OPTION_SEND_TIMEOUT, &t, sizeof(t));
+    InternetSetOptionW(hOpen, INTERNET_OPTION_RECEIVE_TIMEOUT, &t, sizeof(t));
+    HINTERNET hFile = InternetOpenUrlW(hOpen, url.c_str(), L"User-Agent: GitMenuTool\r\n", 0,
+                                       INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE, 0);
+    if (hFile) {
+        char buf[4096]; DWORD rd = 0;
+        while (InternetReadFile(hFile, buf, sizeof(buf), &rd) && rd) out.append(buf, rd);
+        InternetCloseHandle(hFile);
+    }
+    InternetCloseHandle(hOpen);
+    return out;
+}
+// UTF-8 字符串 → 宽字符
+static std::wstring Utf8ToWideRaw(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
+    return w;
+}
+// 极简 JSON 字符串字段提取（仅取 "key":"value" 形态；null/缺失返回空）；转义序列原样保留
+static std::wstring JsonGetStringRaw(const std::string& json, const char* key) {
+    std::string pat = std::string("\"") + key + "\":";
+    size_t p = json.find(pat);
+    if (p == std::string::npos) return L"";
+    p += pat.size();
+    while (p < json.size() && (json[p] == ' ' || json[p] == '\t')) ++p;
+    if (p >= json.size() || json[p] != '"') return L"";   // null 或非字符串
+    ++p;
+    std::string val;
+    while (p < json.size() && json[p] != '"') {
+        if (json[p] == '\\' && p + 1 < json.size()) { val += json[p]; val += json[p + 1]; p += 2; }
+        else { val += json[p]; ++p; }
+    }
+    return Utf8ToWideRaw(val);
+}
+// JSON 转义还原（\n \t \" \\ \/ \b \f \uXXXX；连续代理对拼接即 UTF-16 本身）
+static std::wstring JsonUnescape(std::wstring s) {
+    std::wstring out; out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] != L'\\' || i + 1 >= s.size()) { out += s[i]; continue; }
+        wchar_t c = s[++i];
+        switch (c) {
+        case L'n': out += L'\n'; break;
+        case L't': out += L'\t'; break;
+        case L'r': out += L'\r'; break;
+        case L'b': out += L'\b'; break;
+        case L'f': out += L'\f'; break;
+        case L'"': case L'\\': case L'/': out += c; break;
+        case L'u':
+            if (i + 4 < s.size()) {
+                out += (wchar_t)wcstoul(s.substr(i + 1, 4).c_str(), nullptr, 16);
+                i += 4;
+            }
+            break;
+        default: out += c; break;
+        }
+    }
+    return out;
+}
+// 版本号比较：去 v/V 前缀后按 '.' 分段取数字逐段比较，缺段按 0；返回 >0=a新 <0=b新 0=相同
+// 字母后缀忽略（v1.1a 视作 v1.1；v20261117a 整段数字 20261117）
+static int VersionCompare(const std::wstring& a, const std::wstring& b) {
+    auto segs = [](const std::wstring& s) {
+        std::wstring t = s;
+        if (!t.empty() && (t[0] == L'v' || t[0] == L'V')) t.erase(0, 1);
+        std::vector<unsigned long> v;
+        size_t i = 0;
+        while (i < t.size()) {
+            if (iswdigit(t[i])) {
+                unsigned long n = 0;
+                while (i < t.size() && iswdigit(t[i])) { n = n * 10 + (unsigned long)(t[i] - L'0'); ++i; }
+                v.push_back(n);
+            } else ++i;
+        }
+        return v;
+    };
+    auto va = segs(a), vb = segs(b);
+    size_t n = va.size() > vb.size() ? va.size() : vb.size();
+    for (size_t k = 0; k < n; ++k) {
+        unsigned long x = k < va.size() ? va[k] : 0;
+        unsigned long y = k < vb.size() ? vb[k] : 0;
+        if (x != y) return x < y ? -1 : 1;
+    }
+    return 0;
 }
 // 组装带编码前缀的 git 命令
 static std::vector<std::wstring> G(std::initializer_list<std::wstring> args) {
@@ -885,6 +989,7 @@ struct JobMsg { int kind; std::wstring text; };                     // kind: 0=c
 static const UINT WM_APP_JOBMSG  = WM_APP + 1;                      // wParam=JobMsg*(堆)
 static const UINT WM_APP_JOBDONE = WM_APP + 2;
 static const UINT WM_APP_STATUS  = WM_APP + 3;                      // wParam=segments(堆)
+static const UINT WM_APP_UPDATE  = WM_APP + 4;                      // wParam=UpdateResult*(堆) lParam=1自动/0手动
 // 单任务串行：逐条执行，非 optional 失败即中止；SPECIAL 命令见 HandleSpecial
 static void HandleSpecial(const std::vector<std::wstring>& argv);
 static void ExecAsync(std::vector<JobCmd> cmds) {
@@ -1149,6 +1254,149 @@ static std::optional<std::pair<std::wstring, std::wstring>> AskText2(HWND parent
     EnableWindow(parent, TRUE);
     SetActiveWindow(parent);
     return state.result;
+}
+// ============================ 检查更新结果与弹窗 =============================
+struct UpdateResult {
+    int kind = 2;                  // 0=有新版 1=已最新 2=网络失败
+    std::wstring tag, notes;       // 最新版本标签 / 发布说明（已还原转义）
+};
+static HWND g_hAboutDlg = nullptr;          // 关于弹窗（开着时检查结果写回弹窗）
+static std::atomic<bool> g_updateRunning{ false };
+static bool g_updateNagged = false;         // 自动检测的新版提示每会话只弹一次
+// 当前显示的版本（标题栏口径）：仓库标签优先，无标签回退内置版本号
+static std::wstring CurAppVersion() { return g_repoTag.empty() ? std::wstring(APP_VERSION) : g_repoTag; }
+/**
+  ******************************************************************************
+  * @brief    后台线程检查 GitHub 最新 Release（releases/latest）
+  * @param    autoMode true=自动检测（启动/10分钟周期）；false=弹窗内手动检查
+  * @retval   None
+  * @note     结果经 WM_APP_UPDATE 投递主线程；自动模式失败静默，手动模式弹窗显示网络提示
+  ******************************************************************************
+  */
+static void CheckUpdateAsync(bool autoMode) {
+    bool expected = false;
+    if (!g_updateRunning.compare_exchange_strong(expected, true)) return;   // 已有检查在进行
+    std::thread([autoMode]() {
+        auto* r = new UpdateResult();
+        std::string json = HttpGetUtf8(UPDATE_API_URL);
+        std::wstring tag = json.empty() ? L"" : JsonUnescape(JsonGetStringRaw(json, "tag_name"));
+        if (!tag.empty()) {
+            r->tag = tag;
+            r->notes = JsonUnescape(JsonGetStringRaw(json, "body"));
+            r->kind = VersionCompare(tag, CurAppVersion()) > 0 ? 0 : 1;
+        }   // 其余保持 kind=2（网络失败）
+        PostMessageW(g_main, WM_APP_UPDATE, (WPARAM)r, (LPARAM)(autoMode ? 1 : 0));
+    }).detach();
+}
+// 升级说明文本（限行数防超长把弹窗撑爆）：有新版时的状态区内容
+static std::wstring UpdateFoundText(const UpdateResult& r) {
+    std::wstring s = L"发现新版本：" + r.tag + L"（当前 " + CurAppVersion() + L"）\n\n升级内容：\n";
+    std::wstring body = r.notes.empty() ? L"（无详细说明）" : r.notes;
+    int lines = 0; size_t cut = 0;
+    for (size_t i = 0; i <= body.size(); ++i) {
+        if (i == body.size() || body[i] == L'\n') {
+            if (++lines > 15) { body = body.substr(0, cut) + L"\n…（说明过长已截断）"; break; }
+            cut = i + 1;
+        }
+    }
+    return s + body;
+}
+/**
+  ******************************************************************************
+  * @brief    关于弹窗的过程：检查更新按钮 / 打开发布页 / 关闭
+  * @param    h 弹窗句柄
+  * @param    data AboutState 指针
+  * @retval   None
+  * @note     检查结果不走这里——WM_APP_UPDATE 在主窗口过程中直接改本弹窗控件
+  ******************************************************************************
+  */
+struct AboutState { bool done = false; };
+static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
+    AboutState* st = (AboutState*)data;
+    switch (m) {
+    case WM_COMMAND: {
+        int id = LOWORD(w);
+        if (id == IDC_ABOUT_CHECK) {
+            EnableWindow(GetDlgItem(h, IDC_ABOUT_CHECK), FALSE);
+            SetDlgItemTextW(h, IDC_ABOUT_STATUS, L"正在检查更新，请稍候…（GitHub 较慢时约需十几秒）");
+            CheckUpdateAsync(false);
+            return 0;
+        }
+        if (id == IDC_ABOUT_PAGE) {
+            ShellExecuteW(nullptr, L"open", UPDATE_RELEASE_PAGE, nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
+        }
+        if (id == IDCANCEL) { st->done = true; DestroyWindow(h); return 0; }
+        return 0;
+    }
+    case WM_DESTROY:
+        g_hAboutDlg = nullptr;
+        return 0;
+    case WM_CLOSE:
+        st->done = true;
+        DestroyWindow(h);
+        return 0;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+/**
+  ******************************************************************************
+  * @brief    关于弹窗：工具名 + 当前版本 + 作者 + 检查更新 + 打开发布页
+  * @param    pre 非空时预填检查结果（自动检测弹出版），可传 nullptr
+  * @retval   None
+  * @note     模态骨架与 AskText 相同（子类过程收命令 + 循环只泵消息）；结果异步回填
+  ******************************************************************************
+  */
+static void ShowAboutDialog(const UpdateResult* pre) {
+    int m = (int)(14 * g_scale), btnH = (int)(28 * g_scale);
+    int w = (int)(470 * g_scale), ch = (int)(360 * g_scale);
+    RECT rcFrame = { 0, 0, w, ch };
+    AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    int ww = rcFrame.right - rcFrame.left, wh = rcFrame.bottom - rcFrame.top;
+    RECT pr; GetWindowRect(g_main, &pr);
+    int x = pr.left + ((pr.right - pr.left) - ww) / 2, y = pr.top + ((pr.bottom - pr.top) - wh) / 2;
+    if (x < 0) x = 0; if (y < 0) y = 0;
+    static AboutState st;
+    st.done = false;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", L"关于",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, g_main, nullptr, g_hInst, nullptr);
+    DWORD stStyle = WS_CHILD | WS_VISIBLE | SS_LEFT;
+    int infoH = (int)(96 * g_scale);
+    HWND hInfo = CreateWindowExW(0, L"STATIC",
+        (std::wstring(APP_TITLE) + L"\n当前版本：" + CurAppVersion() + L"\n作者：" + APP_AUTHOR).c_str(),
+        stStyle, m, m, w - 2 * m, infoH, dlg, (HMENU)IDC_ABOUT_INFO, g_hInst, nullptr);
+    HWND hStatus = CreateWindowExW(0, L"STATIC",
+        L"启动及运行期间每 10 分钟会自动检查更新；\n也可点下方按钮手动检查。",
+        stStyle, m, m + infoH, w - 2 * m, ch - 2 * m - infoH - 2 * btnH, dlg, (HMENU)IDC_ABOUT_STATUS, g_hInst, nullptr);
+    int bw = (int)(110 * g_scale), by = ch - m - btnH;
+    HWND hCheck = CreateWindowExW(0, L"BUTTON", L"检查更新", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        m, by, bw, btnH, dlg, (HMENU)IDC_ABOUT_CHECK, g_hInst, nullptr);
+    HWND hPage = CreateWindowExW(0, L"BUTTON", L"打开发布页", WS_CHILD,   // 有新版才显示
+        m + bw + (int)(8 * g_scale), by, bw, btnH, dlg, (HMENU)IDC_ABOUT_PAGE, g_hInst, nullptr);
+    HWND hClose = CreateWindowExW(0, L"BUTTON", L"关闭", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        w - m - bw, by, bw, btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
+    SendMessageW(hInfo, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hStatus, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hCheck, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hPage, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(hClose, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    if (pre && pre->kind == 0) {   // 自动检测到新版弹出：状态区直接显示结果
+        std::wstring txt = UpdateFoundText(*pre);
+        SetWindowTextW(hStatus, txt.c_str());
+        ShowWindow(hPage, SW_SHOW);
+    }
+    SetWindowSubclass(dlg, AboutDlgSub, 1, (DWORD_PTR)&st);
+    EnableWindow(g_main, FALSE);
+    g_hAboutDlg = dlg;
+    ShowWindow(dlg, SW_SHOW);
+    MSG msg;
+    while (!st.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (IsDialogMessageW(dlg, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    EnableWindow(g_main, TRUE);
+    SetActiveWindow(g_main);
 }
 // 全局配置弹窗状态：两个输入框 + 默认分支下拉；OK 收集三行文本，取消置空 result
 struct Cfg3State {
@@ -2539,6 +2787,7 @@ static void BuildControls() {
     MkBtn(g_main, L"打开", IDC_PICKDIR, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"清空输出", IDC_CLEAROUT, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"克隆仓库", IDM_CLONE, 0, 0, 0, 0, g_fontUI);
+    MkBtn(g_main, L"ℹ 关于", IDC_ABOUT, 0, 0, 0, 0, g_fontUI);   // 关于行（标题栏与操作目录行之间）
     // 状态按钮行
     MkBtn(g_main, L"⟳ 刷新状态", IDC_REFRESH, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"⚙ 修改全局配置", IDC_GLOBALCFG, 0, 0, 0, 0, g_fontUI);
@@ -2594,19 +2843,22 @@ static void Layout() {
         lblW = sz0.cx + (int)(8 * g_scale);
         lblH = sz0.cy + 6;
     }
-    MoveWindow(g_topStatics[0], lblX, m + 5, lblW, lblH, TRUE);
+    // 关于行：标题栏与"操作目录"行之间，仅一个【ℹ 关于】按钮
+    int row1Y = m + (int)(28 * g_scale) + (int)(4 * g_scale);
+    MoveWindow(GetDlgItem(g_main, IDC_ABOUT), lblX, m, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(g_topStatics[0], lblX, row1Y + 5, lblW, lblH, TRUE);
     int entryX = lblX + lblW + (int)(4 * g_scale);
     int entryR = W - (int)(308 * g_scale) - (int)(8 * g_scale);   /* 「打开」按钮左缘留 8px */
     if (entryR < entryX + (int)(120 * g_scale)) entryR = entryX + (int)(120 * g_scale);
-    MoveWindow(g_editDir, entryX, m, entryR - entryX, (int)(24 * g_scale), TRUE);
+    MoveWindow(g_editDir, entryX, row1Y, entryR - entryX, (int)(24 * g_scale), TRUE);
     // 打开 / 清空输出 / 克隆仓库 放右端
     HWND open = GetDlgItem(g_main, IDC_PICKDIR), clear = GetDlgItem(g_main, IDC_CLEAROUT), clone = GetDlgItem(g_main, IDM_CLONE);
-    MoveWindow(open, W - (int)(308 * g_scale), m, (int)(64 * g_scale), (int)(24 * g_scale), TRUE);
-    MoveWindow(clear, W - (int)(236 * g_scale), m, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
-    MoveWindow(clone, W - (int)(138 * g_scale), m, (int)(86 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(open, W - (int)(308 * g_scale), row1Y, (int)(64 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(clear, W - (int)(236 * g_scale), row1Y, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(clone, W - (int)(138 * g_scale), row1Y, (int)(86 * g_scale), (int)(24 * g_scale), TRUE);
     // 左栏
     // 左栏与状态按钮行同一起点（都在"操作目录"行下方）
-    int bodyY = m + (int)(24 * g_scale) + (int)(8 * g_scale);
+    int bodyY = row1Y + (int)(24 * g_scale) + (int)(8 * g_scale);
     MoveWindow(g_leftPanel, 0, bodyY, leftW, H - bodyY, TRUE);
     UpdateLeftScroll(g_leftPanel);
     {   // 窗口变高后钳制滚动位置，滑块与内容保持一致
@@ -2691,6 +2943,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id == IDC_OPENIGN) { OpOpenIgnore(); return 0; }
         if (id == IDC_RESET) { OpResetGit(); return 0; }
         if (id == IDM_CLONE) { OpClone(); return 0; }
+        if (id == IDC_ABOUT) { ShowAboutDialog(nullptr); return 0; }
         if (id >= IDM_BASE && id < IDM_BASE + 100) {
             for (auto& cat : MENU)
                 for (auto& item : cat.items)
@@ -2728,12 +2981,41 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         RenderStatus((std::vector<std::vector<Seg>>*)w);
         InvalidateRect(g_leftPanel, nullptr, FALSE);   // g_flowBlock 可能变化，左栏灰/亮态同步重绘
         return 0;
+    case WM_APP_UPDATE: {
+        // 检查更新结果：弹窗开着→写回弹窗；否则自动模式发现新版→弹关于弹窗（每会话一次），其余静默
+        UpdateResult* r = (UpdateResult*)w;
+        bool autoMode = l != 0;
+        if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
+            const wchar_t* txt;
+            std::wstring found;
+            if (r->kind == 0) {
+                found = UpdateFoundText(*r);
+                ShowWindow(GetDlgItem(g_hAboutDlg, IDC_ABOUT_PAGE), SW_SHOW);
+                txt = found.c_str();
+            } else if (r->kind == 1) {
+                txt = L"已是最新版本 ✓";
+            } else {
+                txt = L"检查失败：无法连接更新服务器（或仓库暂无发布版本）。\n请确认电脑可以上网后，再点一次【检查更新】。";
+            }
+            SetDlgItemTextW(g_hAboutDlg, IDC_ABOUT_STATUS, txt);
+            EnableWindow(GetDlgItem(g_hAboutDlg, IDC_ABOUT_CHECK), TRUE);
+        } else if (autoMode && r->kind == 0 && !g_updateNagged) {
+            g_updateNagged = true;   // 本次会话不再自动弹，手动检查仍可用
+            ShowAboutDialog(r);
+        }
+        g_updateRunning = false;
+        delete r;
+        return 0;
+    }
     case WM_TIMER:
         // 定时自动刷新状态卡：感知工具外部的改动（他处提交/推送/切分支），空闲时才刷新
         if (w == 1 && !g_busy && !g_statusRunning) RefreshStatusAsync();
+        // 每 10 分钟自动检查更新：失败静默，发现新版每会话只弹一次
+        if (w == 2 && !g_busy) CheckUpdateAsync(true);
         return 0;
     case WM_DESTROY:
         KillTimer(g_main, 1);
+        KillTimer(g_main, 2);
         PostQuitMessage(0);
         return 0;
     }
@@ -2808,6 +3090,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_topStatics[1] = MkStatic(g_main, L">_", 0, 0, 0, 0, 0, g_fontMono);
     BuildControls();
     SetTimer(g_main, 1, 4000, nullptr);          // 每 4 秒自动刷新状态卡
+    SetTimer(g_main, 2, 600000, nullptr);        // 每 10 分钟自动检查更新（后台静默）
+    CheckUpdateAsync(true);                      // 启动即查一次更新
     ShowWindow(g_main, nCmdShow);
     UpdateWindow(g_main);
     // 记住上次目录
