@@ -59,6 +59,7 @@ namespace fs = std::filesystem;
 #define IDC_ABOUT_INFO  3003
 #define IDC_ABOUT_STATUS 3004
 #define IDC_ABOUT_UPGRADE 3005
+#define IDC_ABOUT_VER     3006
 #define IDM_BASE      2000
 
 // ============================ 全局 ==========================================
@@ -159,6 +160,7 @@ static HINSTANCE g_hInst = nullptr;
 static HWND g_main = nullptr, g_editDir = nullptr, g_stat = nullptr, g_out = nullptr;
 static HWND g_cmdEdit = nullptr, g_leftPanel = nullptr;
 static HFONT g_fontUI = nullptr, g_fontUIBold = nullptr, g_fontMono = nullptr;
+static HFONT g_fontUIBig = nullptr;                            // 关于弹窗工具名（12pt，比 UI 大 2 号）
 static HFONT g_fontMenu = nullptr, g_fontMenuBold = nullptr;   // 左侧菜单小两号
 static WNDPROC g_dirEditProc = nullptr, g_cmdEditProc = nullptr;
 static double g_scale = 1.0;
@@ -1428,7 +1430,66 @@ static std::wstring DoUpgradeSwap(const std::wstring& tmpExe) {
   * @note     检查结果不走这里——WM_APP_UPDATE 在主窗口过程中直接改本弹窗控件
   ******************************************************************************
   */
-struct AboutState { bool done = false; };
+struct AboutState {
+    bool done = false;
+    int w = 0, ch = 0, m = 0, bw = 0, btnH = 0, gap = 0;
+    int statusY = 0, statusH0 = 0, statusExtra = 0;   // 状态区纵向基线/已追加高度
+    int y1 = 0, y2 = 0;                               // 两行按钮基线
+};
+static AboutState g_aboutState;
+// 统计文本行数（状态区加高量按行数估算）
+static int AboutTextLines(const std::wstring& s) {
+    int n = 1;
+    for (wchar_t c : s) if (c == L'\n') ++n;
+    return n;
+}
+/**
+  ******************************************************************************
+  * @brief    关于弹窗回填检查结果：居中显示、按钮显隐与居中、按说明行数加高弹窗
+  * @param    dlg 关于弹窗句柄
+  * @param    r 检查结果（kind 0=新版本 1=已最新 2=失败）
+  * @retval   None
+  * @note     启动自动弹窗与异步回填共用；发现新版时行1变双钮、行2出现发布页
+  ******************************************************************************
+  */
+static void AboutApplyResult(HWND dlg, const UpdateResult& r) {
+    AboutState& s = g_aboutState;
+    HWND hCheck = GetDlgItem(dlg, IDC_ABOUT_CHECK);
+    HWND hUpg = GetDlgItem(dlg, IDC_ABOUT_UPGRADE);
+    HWND hPage = GetDlgItem(dlg, IDC_ABOUT_PAGE);
+    if (r.kind == 0) {
+        std::wstring found = UpdateFoundText(r);
+        SetDlgItemTextW(dlg, IDC_ABOUT_STATUS, found.c_str());
+        g_upgradeExeUrl = r.exeUrl;
+        ShowWindow(hUpg, SW_SHOW);
+        ShowWindow(hPage, SW_SHOW);
+        int x2 = (s.w - 2 * s.bw - s.gap) / 2;                       // 行1 双钮居中
+        MoveWindow(hCheck, x2, s.y1 + s.statusExtra, s.bw, s.btnH, TRUE);
+        MoveWindow(hUpg, x2 + s.bw + s.gap, s.y1 + s.statusExtra, s.bw, s.btnH, TRUE);
+        MoveWindow(hPage, (s.w - s.bw) / 2, s.y2 + s.statusExtra, s.bw, s.btnH, TRUE);
+        int need = (int)(AboutTextLines(found) * 17 * g_scale) + (int)(8 * g_scale);  // 状态区所需高度
+        int extra = need - (s.statusH0 + s.statusExtra);
+        if (extra > 0) {                                             // 加高弹窗：状态区拉高、按钮下移
+            RECT fr; GetWindowRect(dlg, &fr);
+            SetWindowPos(dlg, nullptr, 0, 0, fr.right - fr.left, fr.bottom - fr.top + extra,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            MoveWindow(GetDlgItem(dlg, IDC_ABOUT_STATUS), s.m, s.statusY, s.w - 2 * s.m,
+                       s.statusH0 + s.statusExtra + extra, TRUE);
+            MoveWindow(hCheck, x2, s.y1 + s.statusExtra + extra, s.bw, s.btnH, TRUE);
+            MoveWindow(hUpg, x2 + s.bw + s.gap, s.y1 + s.statusExtra + extra, s.bw, s.btnH, TRUE);
+            MoveWindow(hPage, (s.w - s.bw) / 2, s.y2 + s.statusExtra + extra, s.bw, s.btnH, TRUE);
+            s.statusExtra += extra;
+        }
+    } else {
+        SetDlgItemTextW(dlg, IDC_ABOUT_STATUS,
+            r.kind == 1 ? L"已是最新版本 ✓"
+                        : L"检查失败：无法连接更新服务器（或仓库暂无发布版本）。\n请确认电脑可以上网后，再点一次【检查更新】。");
+        g_upgradeExeUrl.clear();
+        ShowWindow(hUpg, SW_HIDE);
+        ShowWindow(hPage, SW_HIDE);
+        MoveWindow(hCheck, (s.w - s.bw) / 2, s.y1 + s.statusExtra, s.bw, s.btnH, TRUE);   // 单钮居中
+    }
+}
 static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
     AboutState* st = (AboutState*)data;
     switch (m) {
@@ -1476,56 +1537,51 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
   ******************************************************************************
   */
 static void ShowAboutDialog(const UpdateResult* pre) {
-    int m = (int)(10 * g_scale), btnH = (int)(26 * g_scale);
-    int w = (int)(300 * g_scale), ch = (int)(210 * g_scale);
-    RECT rcFrame = { 0, 0, w, ch };
+    AboutState& s = g_aboutState;
+    s.done = false;
+    s.m = (int)(10 * g_scale); s.btnH = (int)(26 * g_scale);
+    s.bw = (int)(95 * g_scale); s.gap = (int)(6 * g_scale);
+    s.w = (int)(300 * g_scale); s.ch = (int)(200 * g_scale);
+    s.y1 = s.ch - s.m - 2 * s.btnH - (int)(4 * g_scale);   // 按钮行1：检查更新/一键升级
+    s.y2 = s.ch - s.m - s.btnH;                            // 按钮行2：打开发布页
+    s.statusY = s.m + (int)(66 * g_scale);                 // 状态区顶（工具名 26 + 版本/作者 40）
+    s.statusH0 = s.y1 - (int)(4 * g_scale) - s.statusY;
+    s.statusExtra = 0;
+    RECT rcFrame = { 0, 0, s.w, s.ch };
     AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
     int ww = rcFrame.right - rcFrame.left, wh = rcFrame.bottom - rcFrame.top;
     RECT pr; GetWindowRect(g_main, &pr);
     int x = pr.left + ((pr.right - pr.left) - ww) / 2, y = pr.top + ((pr.bottom - pr.top) - wh) / 2;
     if (x < 0) x = 0; if (y < 0) y = 0;
-    static AboutState st;
-    st.done = false;
     HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", L"关于",
         WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, g_main, nullptr, g_hInst, nullptr);
-    DWORD stStyle = WS_CHILD | WS_VISIBLE | SS_LEFT;
-    int infoH = (int)(58 * g_scale);                     // 工具名/版本/作者 3 行
-    int y1 = ch - m - 2 * btnH - (int)(4 * g_scale);     // 按钮行1：检查更新/一键升级
-    int y2 = ch - m - btnH;                              // 按钮行2：打开发布页/关闭
-    HWND hInfo = CreateWindowExW(0, L"STATIC",
-        (std::wstring(APP_TITLE) + L"\n当前版本：" + CurAppVersion() + L"\n作者：" + APP_AUTHOR).c_str(),
-        stStyle, m, m, w - 2 * m, infoH, dlg, (HMENU)IDC_ABOUT_INFO, g_hInst, nullptr);
-    HWND hStatus = CreateWindowExW(0, L"STATIC",
-        L"启动及运行期间每 10 分钟会自动检查更新；\n也可点下方按钮手动检查。",
-        stStyle, m, m + infoH, w - 2 * m, y1 - (m + infoH) - (int)(4 * g_scale), dlg, (HMENU)IDC_ABOUT_STATUS, g_hInst, nullptr);
-    int bw = (int)(95 * g_scale);
+    DWORD ctr = WS_CHILD | WS_VISIBLE | SS_CENTER;         // 全部文字居中
+    HWND hTitle = CreateWindowExW(0, L"STATIC", APP_TITLE, ctr,
+        s.m, s.m, s.w - 2 * s.m, (int)(26 * g_scale), dlg, (HMENU)IDC_ABOUT_INFO, g_hInst, nullptr);
+    HWND hVer = CreateWindowExW(0, L"STATIC",
+        (L"当前版本：" + CurAppVersion() + L"\n作者：" + APP_AUTHOR).c_str(), ctr,
+        s.m, s.m + (int)(26 * g_scale), s.w - 2 * s.m, (int)(40 * g_scale), dlg, (HMENU)IDC_ABOUT_VER, g_hInst, nullptr);
+    HWND hStatus = CreateWindowExW(0, L"STATIC", L"", ctr,
+        s.m, s.statusY, s.w - 2 * s.m, s.statusH0, dlg, (HMENU)IDC_ABOUT_STATUS, g_hInst, nullptr);
     HWND hCheck = CreateWindowExW(0, L"BUTTON", L"检查更新", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        m, y1, bw, btnH, dlg, (HMENU)IDC_ABOUT_CHECK, g_hInst, nullptr);
+        (s.w - s.bw) / 2, s.y1, s.bw, s.btnH, dlg, (HMENU)IDC_ABOUT_CHECK, g_hInst, nullptr);
     HWND hUpgrade = CreateWindowExW(0, L"BUTTON", L"一键升级", WS_CHILD,   // 发现新版才显示
-        m + bw + (int)(6 * g_scale), y1, bw, btnH, dlg, (HMENU)IDC_ABOUT_UPGRADE, g_hInst, nullptr);
+        (s.w - 2 * s.bw - s.gap) / 2 + s.bw + s.gap, s.y1, s.bw, s.btnH, dlg, (HMENU)IDC_ABOUT_UPGRADE, g_hInst, nullptr);
     HWND hPage = CreateWindowExW(0, L"BUTTON", L"打开发布页", WS_CHILD,   // 发现新版才显示
-        m, y2, bw, btnH, dlg, (HMENU)IDC_ABOUT_PAGE, g_hInst, nullptr);
-    HWND hClose = CreateWindowExW(0, L"BUTTON", L"关闭", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-        w - m - bw, y2, bw, btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
-    SendMessageW(hInfo, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+        (s.w - s.bw) / 2, s.y2, s.bw, s.btnH, dlg, (HMENU)IDC_ABOUT_PAGE, g_hInst, nullptr);
+    SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_fontUIBig, TRUE);   // 工具名大 2 号
+    SendMessageW(hVer, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hStatus, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hCheck, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hUpgrade, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     SendMessageW(hPage, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
-    SendMessageW(hClose, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
-    if (pre && pre->kind == 0) {   // 自动检测到新版弹出：状态区直接显示结果
-        std::wstring txt = UpdateFoundText(*pre);
-        SetWindowTextW(hStatus, txt.c_str());
-        g_upgradeExeUrl = pre->exeUrl;
-        ShowWindow(hUpgrade, SW_SHOW);
-        ShowWindow(hPage, SW_SHOW);
-    }
-    SetWindowSubclass(dlg, AboutDlgSub, 1, (DWORD_PTR)&st);
+    if (pre) AboutApplyResult(dlg, *pre);   // 自动检测到新版弹出：直接显示结果
+    SetWindowSubclass(dlg, AboutDlgSub, 1, (DWORD_PTR)&s);
     EnableWindow(g_main, FALSE);
     g_hAboutDlg = dlg;
     ShowWindow(dlg, SW_SHOW);
     MSG msg;
-    while (!st.done && GetMessageW(&msg, nullptr, 0, 0)) {
+    while (!s.done && GetMessageW(&msg, nullptr, 0, 0)) {
         if (IsDialogMessageW(dlg, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
@@ -3117,25 +3173,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         InvalidateRect(g_leftPanel, nullptr, FALSE);   // g_flowBlock 可能变化，左栏灰/亮态同步重绘
         return 0;
     case WM_APP_UPDATE: {
-        // 检查更新结果：弹窗开着→写回弹窗；否则自动模式发现新版→弹关于弹窗（每会话一次），其余静默
+        // 检查更新结果：弹窗开着→居中回填（发现新版加高弹窗）；否则自动模式发现新版→弹关于弹窗（每会话一次），其余静默
         UpdateResult* r = (UpdateResult*)w;
         bool autoMode = l != 0;
         if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
-            const wchar_t* txt;
-            std::wstring found;
-            if (r->kind == 0) {
-                found = UpdateFoundText(*r);
-                g_upgradeExeUrl = r->exeUrl;   // 一键升级用的附件直链
-                ShowWindow(GetDlgItem(g_hAboutDlg, IDC_ABOUT_PAGE), SW_SHOW);
-                ShowWindow(GetDlgItem(g_hAboutDlg, IDC_ABOUT_UPGRADE), SW_SHOW);
-                txt = found.c_str();
-            } else if (r->kind == 1) {
-                g_upgradeExeUrl.clear();
-                txt = L"已是最新版本 ✓";
-            } else {
-                txt = L"检查失败：无法连接更新服务器（或仓库暂无发布版本）。\n请确认电脑可以上网后，再点一次【检查更新】。";
-            }
-            SetDlgItemTextW(g_hAboutDlg, IDC_ABOUT_STATUS, txt);
+            AboutApplyResult(g_hAboutDlg, *r);
             EnableWindow(GetDlgItem(g_hAboutDlg, IDC_ABOUT_CHECK), TRUE);
         } else if (autoMode && r->kind == 0 && !g_updateNagged) {
             g_updateNagged = true;   // 本次会话不再自动弹，手动检查仍可用
@@ -3213,6 +3255,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_scale = GetDeviceCaps(GetDC(nullptr), LOGPIXELSX) / 96.0;
     g_fontUI = MkFont(10, false, L"Microsoft YaHei UI");
     g_fontUIBold = MkFont(10, true, L"Microsoft YaHei UI");
+    g_fontUIBig = MkFont(12, false, L"Microsoft YaHei UI");
     g_fontMono = MkFont(11, false, L"Consolas");
     g_fontMenu = MkFont(8, false, L"Microsoft YaHei UI");
     g_fontMenuBold = MkFont(8, true, L"Microsoft YaHei UI");
