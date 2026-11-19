@@ -1295,6 +1295,7 @@ static void CheckUpdateAsync(bool autoMode) {
             r->kind = VersionCompare(tag, CurAppVersion()) > 0 ? 0 : 1;
         }   // 其余保持 kind=2（网络失败）
         PostMessageW(g_main, WM_APP_UPDATE, (WPARAM)r, (LPARAM)(autoMode ? 1 : 0));
+        g_updateRunning = false;   // 线程内清零：自动弹窗的模态循环会卡住 handler，清零不能放 handler 里
     }).detach();
 }
 // 升级说明文本（限行数防超长把弹窗撑爆）：有新版时的状态区内容
@@ -3012,7 +3013,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             g_updateNagged = true;   // 本次会话不再自动弹，手动检查仍可用
             ShowAboutDialog(r);
         }
-        g_updateRunning = false;
         delete r;
         return 0;
     }
