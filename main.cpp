@@ -376,11 +376,15 @@ static std::string HttpGetVia(bool useProxy, const std::wstring& url) {
     return out;
 }
 // 检查更新取 JSON：直连优先，内容无 "tag_name" 字段（403/404 错误页）再走系统代理；都无效返回空
-static std::string HttpGetUtf8(const std::wstring& url) {
-    std::string s = HttpGetVia(false, url);
-    if (s.find("\"tag_name\"") != std::string::npos) return s;
-    s = HttpGetVia(true, url);
-    if (s.find("\"tag_name\"") != std::string::npos) return s;
+// rateLimited 出参：两路响应都是 GitHub 限流页时置 true（匿名 60 次/小时/IP），供文案区分
+static std::string HttpGetUtf8(const std::wstring& url, bool* rateLimited = nullptr) {
+    std::string s1 = HttpGetVia(false, url);
+    if (s1.find("\"tag_name\"") != std::string::npos) return s1;
+    std::string s2 = HttpGetVia(true, url);
+    if (s2.find("\"tag_name\"") != std::string::npos) return s2;
+    if (rateLimited)
+        *rateLimited = s1.find("rate limit") != std::string::npos
+                    || s2.find("rate limit") != std::string::npos;
     return "";
 }
 // 下载 exe 二进制：直连优先（>100KB 视为有效，错误页只有几百字节），无效再走系统代理
@@ -1296,11 +1300,12 @@ struct UpdateResult {
     int kind = 2;                  // 0=有新版 1=已最新 2=网络失败
     std::wstring tag, notes;       // 最新版本标签 / 发布说明（已还原转义）
     std::wstring exeUrl;           // assets 里 exe 附件直链（kind=0 时有效）
+    bool rateLimit = false;        // kind=2 时区分：GitHub 匿名配额用尽 / 一般网络问题
 };
 static HWND g_hAboutDlg = nullptr;          // 关于弹窗（开着时检查结果写回弹窗）
 static std::atomic<bool> g_updateRunning{ false };
 static bool g_updateNagged = false;         // 自动检测的新版提示每会话只弹一次
-// 当前显示的版本（标题栏口径）：仓库标签优先，无标签回退内置版本号
+// 当前显示的版本（关于弹窗口径）：仓库标签优先，无标签回退内置版本号
 static std::wstring CurAppVersion() { return g_repoTag.empty() ? std::wstring(APP_VERSION) : g_repoTag; }
 /**
   ******************************************************************************
@@ -1315,14 +1320,16 @@ static void CheckUpdateAsync(bool autoMode) {
     if (!g_updateRunning.compare_exchange_strong(expected, true)) return;   // 已有检查在进行
     std::thread([autoMode]() {
         auto* r = new UpdateResult();
-        std::string json = HttpGetUtf8(UPDATE_API_URL);
+        bool rate = false;
+        std::string json = HttpGetUtf8(UPDATE_API_URL, &rate);
         std::wstring tag = json.empty() ? L"" : JsonUnescape(JsonGetStringRaw(json, "tag_name"));
+        r->rateLimit = rate;
         if (!tag.empty()) {
             r->tag = tag;
             r->notes = JsonUnescape(JsonGetStringRaw(json, "body"));
             r->kind = VersionCompare(tag, CurAppVersion()) > 0 ? 0 : 1;
             if (r->kind == 0) r->exeUrl = JsonGetAssetExe(json);
-        }   // 其余保持 kind=2（网络失败）
+        }   // 其余保持 kind=2（网络失败/限流）
         PostMessageW(g_main, WM_APP_UPDATE, (WPARAM)r, (LPARAM)(autoMode ? 1 : 0));
         g_updateRunning = false;   // 线程内清零：自动弹窗的模态循环会卡住 handler，清零不能放 handler 里
     }).detach();
@@ -1483,7 +1490,8 @@ static void AboutApplyResult(HWND dlg, const UpdateResult& r) {
     } else {
         SetDlgItemTextW(dlg, IDC_ABOUT_STATUS,
             r.kind == 1 ? L"已是最新版本 ✓"
-                        : L"检查失败：无法连接更新服务器（或仓库暂无发布版本）。\n请确认电脑可以上网后，再点一次【检查更新】。");
+                        : (r.rateLimit ? L"检查失败：GitHub 接口访问配额已用完（匿名每小时 60 次）。\n请一小时后再试，或点【打开发布页】手动查看。"
+                                       : L"检查失败：无法连接更新服务器（或仓库暂无发布版本）。\n请确认电脑可以上网后，再点一次【检查更新】。"));
         g_upgradeExeUrl.clear();
         ShowWindow(hUpg, SW_HIDE);
         ShowWindow(hPage, SW_HIDE);
@@ -3286,8 +3294,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     int x = std::max(0, (GetSystemMetrics(SM_CXSCREEN) - W) / 2);
     int y = std::max(0, (GetSystemMetrics(SM_CYSCREEN) - H) / 2);
     g_main = CreateWindowExW(0, L"GIT_MENU_MAIN",
-                             (std::wstring(APP_TITLE) + L" " +
-                              (g_repoTag.empty() ? std::wstring(APP_VERSION) : g_repoTag)).c_str(),
+                             APP_TITLE,   // 标题栏不显示版本，版本在关于弹窗里
                              WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,   // 主窗不擦子控件区，否则白底盖住 RichEdit 黑底
                              x, y, W, H, nullptr, nullptr, hInst, nullptr);
     // 顶栏两个 STATIC（Layout 引用 g_topStatics）
