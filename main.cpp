@@ -2307,16 +2307,16 @@ static void OpTagDel() {
     if (!EnsureRepo()) return;
     auto name = AskText(g_main, L"删除标签", L"要删除的标签名:");
     if (!name || name->empty()) return;
-    // 本地/远端两个独立确认：只删远端也支持（不需要本地标签存在），避免"本地点了否"导致远端无法同步
-    bool delLocal = Confirm(g_main, Fmt(L"是否删除【本地】标签 [%s]？", name->c_str()));
-    bool delRemote = false;
-    if (!g_remote.empty())
-        delRemote = Confirm(g_main, Fmt(L"是否删除【远端 %s】上的同名标签？\n（远端删除不依赖本地，本地选否也能删远端）", g_remote.c_str()));
-    if (!delLocal && !delRemote) return;
-    std::vector<JobCmd> cmds;
-    if (delLocal)  cmds.push_back({ G({ L"tag", L"-d", *name }), true });   // 本地可能早已删除，失败不阻断远端删除
-    if (delRemote) cmds.push_back({ G({ L"push", g_remote, L":refs/tags/" + *name }), false });
-    ExecAsync(std::move(cmds));
+    if (!Confirm(g_main, Fmt(L"确认删除【本地】标签 [%s]？\n（远端不受影响；要删远端用【推送(删除tag)】）", name->c_str()))) return;
+    Exec({ G({ L"tag", L"-d", *name }) });
+}
+// 推送(删除tag)：删除【远端】标签（推送空引用 :refs/tags/<名>），本地标签不受影响
+static void OpTagRemoteDel() {
+    if (!EnsureRepo() || NeedRemote()) return;
+    auto name = AskText(g_main, L"推送(删除tag)", L"要删除的【远端】标签名:");
+    if (!name || name->empty()) return;
+    if (!Confirm(g_main, Fmt(L"确认删除远端（%s）上的标签 [%s]？\n本地标签不受影响。", g_remote.c_str(), name->c_str()))) return;
+    Exec({ G({ L"push", g_remote, L":refs/tags/" + *name }) });
 }
 static void OpBranchSw() {
     if (!EnsureRepo()) return;
@@ -2881,7 +2881,7 @@ static void OpResetGit() {
 enum {
     IDM_REMOTE_ADD = IDM_BASE, IDM_REMOTE_RENAME,
     IDM_CLONE, IDM_STATUS, IDM_DIFF, IDM_COMMIT, IDM_PUSH, IDM_FORCE_PUSH, IDM_PULL, IDM_LOG_ALL, IDM_SHOW, IDM_REMOTE_INFO,
-    IDM_TAG_LIST, IDM_TAG_NEW, IDM_TAG_PUSH, IDM_TAG_DEL,
+    IDM_TAG_LIST, IDM_TAG_NEW, IDM_TAG_PUSH, IDM_TAG_DEL, IDM_TAG_RDEL,
     IDM_BRANCH_SW, IDM_BRANCH_NEW, IDM_BRANCH_MERGE, IDM_BRANCH_DEL, IDM_CHECKOUT_REF, IDM_BACK_MAIN, IDM_STASH, IDM_STASH_POP,
     IDM_RESTORE_STAGED, IDM_RESTORE_FILE, IDM_DISCARD_ALL, IDM_UNDO_LAST, IDM_AMEND, IDM_REVERT, IDM_DELETE_COMMIT,
     IDM_CONFLICT_LIST, IDM_NOTEPAD, IDM_MARK_RESOLVED, IDM_TAKE_OURS, IDM_TAKE_THEIRS, IDM_ABORT_MERGE,
@@ -2910,6 +2910,7 @@ static const MenuCat MENU[] = {
         { IDM_TAG_NEW,      L"打标签",     OpTagNew },
         { IDM_TAG_PUSH,     L"推送(tag)",  OpTagPush },
         { IDM_TAG_DEL,      L"删除标签",   OpTagDel },
+        { IDM_TAG_RDEL,     L"推送(删除tag)", OpTagRemoteDel },
     } },
     { L"分支", {
         { IDM_BRANCH_SW,     L"切换分支",     OpBranchSw },
