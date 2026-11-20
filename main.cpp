@@ -1481,18 +1481,21 @@ static AboutState g_aboutState;
 static void PostDlPct(int pct) { PostMessageW(g_main, WM_APP_DLPCT, (WPARAM)pct, 0); }
 /**
   ******************************************************************************
-  * @brief    在关于弹窗内集成新版信息：新版本号 + 升级内容 + 下载按钮，弹窗高度自适应
+  * @brief    在关于弹窗内集成检查结果：文本区（+下载按钮），弹窗高度自适应
   * @param    dlg 关于弹窗句柄
-  * @param    r 检查结果（kind=0 时调用）
+  * @param    text 结果文本（居中，自动换行）
+  * @param    showDl true=显示下载按钮（检测到新版本时）
+  * @param    dlUrl 新版 exe 直链（showDl 时有效）
+  * @param    dlTag 新版标签（showDl 时有效，换身成功后写升级标记）
   * @retval   None
-  * @note     升级内容按弹窗宽实测换行高度；点下载后弹窗保持，下载按钮原地显示百分比，
+  * @note     文本按弹窗宽实测换行高度；点下载后弹窗保持，下载按钮原地显示百分比，
   *           下载结束由 WM_APP_UPGRADE 恢复按钮并收尾
   ******************************************************************************
   */
-static void ShowUpdateInAbout(HWND dlg, const UpdateResult& r) {
+static void ShowResultInAbout(HWND dlg, const std::wstring& text, bool showDl,
+                              const std::wstring& dlUrl = L"", const std::wstring& dlTag = L"") {
     AboutState& s = g_aboutState;
-    std::wstring text = UpdateFoundText(r);
-    HDC dc = GetDC(nullptr);                                   // 升级内容按弹窗宽实测换行后所需高度
+    HDC dc = GetDC(nullptr);                                   // 结果文本按弹窗宽实测换行后所需高度
     HFONT of = (HFONT)SelectObject(dc, g_fontUISmall);
     RECT tr = { 0, 0, s.w - 2 * s.m, 0 };
     DrawTextW(dc, text.c_str(), -1, &tr, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
@@ -1500,27 +1503,35 @@ static void ShowUpdateInAbout(HWND dlg, const UpdateResult& r) {
     int textH = tr.bottom - tr.top;
     int gap = (int)(6 * g_scale);
     int yText = s.y1 + s.btnH + gap;                           // 结果文本区顶（检查更新按钮下方）
-    int yDl = yText + textH + gap;                             // 下载按钮顶
-    int needCh = yDl + s.btnH + s.m;                           // 弹窗所需客户区高
+    int needCh = showDl ? yText + textH + gap + s.btnH + s.m   // 有下载按钮：文本区+下载行
+                        : yText + textH + s.m;                 // 无下载按钮：仅文本区
     HWND hText = GetDlgItem(dlg, IDC_ABOUT_RESULT);
     HWND hDl = GetDlgItem(dlg, IDC_ABOUT_DL);
-    if (!hText) {                                              // 首次：创建结果区控件
+    if (!hText) {                                              // 首次：创建结果文本区
         hText = CreateWindowExW(0, L"STATIC", text.c_str(),
             WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOPREFIX, s.m, yText, s.w - 2 * s.m, textH,
             dlg, (HMENU)IDC_ABOUT_RESULT, g_hInst, nullptr);
-        hDl = CreateWindowExW(0, L"BUTTON", L"下载", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            (s.w - s.bw) / 2, yDl, s.bw, s.btnH, dlg, (HMENU)IDC_ABOUT_DL, g_hInst, nullptr);
         SendMessageW(hText, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
-        SendMessageW(hDl, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
     } else {                                                   // 再次检查：更新文本与位置
         SetWindowTextW(hText, text.c_str());
         MoveWindow(hText, s.m, yText, s.w - 2 * s.m, textH, TRUE);
-        MoveWindow(hDl, (s.w - s.bw) / 2, yDl, s.bw, s.btnH, TRUE);
-        SetWindowTextW(hDl, L"下载");
-        EnableWindow(hDl, TRUE);
     }
-    s.dlUrl = r.exeUrl;
-    s.dlTag = r.tag;
+    if (showDl) {                                              // 下载按钮：创建或更新后显示
+        if (!hDl) {
+            hDl = CreateWindowExW(0, L"BUTTON", L"下载", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                (s.w - s.bw) / 2, yText + textH + gap, s.bw, s.btnH, dlg, (HMENU)IDC_ABOUT_DL, g_hInst, nullptr);
+            SendMessageW(hDl, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
+        } else {
+            MoveWindow(hDl, (s.w - s.bw) / 2, yText + textH + gap, s.bw, s.btnH, TRUE);
+            SetWindowTextW(hDl, L"下载");
+            EnableWindow(hDl, TRUE);
+        }
+        ShowWindow(hDl, SW_SHOW);
+        s.dlUrl = dlUrl;
+        s.dlTag = dlTag;
+    } else if (hDl) {                                          // 无下载：隐藏按钮
+        ShowWindow(hDl, SW_HIDE);
+    }
     s.downloading = false;
     if (needCh != s.ch) {                                      // 弹窗高度自适应
         RECT fr; GetWindowRect(dlg, &fr);
@@ -1531,7 +1542,7 @@ static void ShowUpdateInAbout(HWND dlg, const UpdateResult& r) {
 }
 /**
   ******************************************************************************
-  * @brief    关于弹窗回填检查结果：新版本集成进弹窗，已最新/失败弹提示框
+  * @brief    关于弹窗回填检查结果：三种结果都集成进弹窗结果区，不再弹提示框
   * @param    dlg 关于弹窗句柄
   * @param    r 检查结果（kind 0=新版本 1=已最新 2=失败）
   * @retval   None
@@ -1541,15 +1552,15 @@ static void ShowUpdateInAbout(HWND dlg, const UpdateResult& r) {
 static void AboutApplyResult(HWND dlg, const UpdateResult& r) {
     HWND hCheck = GetDlgItem(dlg, IDC_ABOUT_CHECK);
     if (r.kind == 0) {
-        ShowUpdateInAbout(dlg, r);     // 新版本号+升级内容+下载按钮，弹窗高度自适应
+        ShowResultInAbout(dlg, UpdateFoundText(r), true, r.exeUrl, r.tag);   // 新版本号+升级内容+下载
     } else if (r.kind == 1) {
-        MessageBoxW(dlg, L"已是最新版本。", L"检查更新", MB_OK | MB_ICONINFORMATION);   // 已最新：只弹提示框
+        ShowResultInAbout(dlg, L"已是最新版本。", false);                      // 已最新：结果区显示
     } else {
-        // 失败：弹提示框
-        MessageBoxW(dlg,
+        // 失败：结果区显示原因
+        ShowResultInAbout(dlg,
             r.rateLimit ? L"检查失败：GitHub 接口访问配额已用完（匿名每小时 60 次）。\n请一小时后再试，或到 github 发布页手动查看。"
                         : L"检查失败：无法连接更新服务器（或仓库暂无发布版本）。\n请确认电脑可以上网后，再点一次【检查更新】。",
-            L"检查更新", MB_OK | MB_ICONWARNING);
+            false);
     }
     EnableWindow(hCheck, TRUE);        // 恢复检查按钮（换身成功会直接退出进程，走不到这）
     SetWindowTextW(hCheck, L"检查更新");
