@@ -286,8 +286,41 @@ static std::vector<std::wstring> SplitLines(const std::wstring& s) {
 
 // ============================ git 子进程执行 ================================
 struct GitResult { int rc = -1; std::wstring out; };
+// 是否存在以 pid 为父的子进程：git 弹出凭据输入窗口（GCM）时会长时间静默，看门狗须放行等待用户操作
+static bool HasChildProcess(HANDLE hProc) {
+    DWORD pid = GetProcessId(hProc);
+    if (!pid) return false;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    bool found = false;
+    if (Process32FirstW(snap, &pe)) {
+        do { if (pe.th32ParentProcessID == pid) { found = true; break; } } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+// 终止 git 及其直接子进程（如凭据窗口），避免留下孤儿输入窗
+static void KillGitTree(HANDLE hProc) {
+    DWORD pid = GetProcessId(hProc);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W pe = { sizeof(pe) };
+        if (Process32FirstW(snap, &pe)) {
+            do {
+                if (pe.th32ParentProcessID == pid) {
+                    HANDLE c = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                    if (c) { TerminateProcess(c, 1); CloseHandle(c); }
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+    }
+    TerminateProcess(hProc, 1);
+}
 // 同步执行一条命令（capture 输出合并、超时强杀、隐藏窗口）
-// idleMs>0 时启用"无响应看门狗"：连续 idleMs 毫秒无任何输出且进程未退出即终止（网络类命令防挂死）
+// idleMs>0 时启用"无响应看门狗"：连续 idleMs 毫秒无任何输出且进程未退出即终止（网络类命令防挂死）；
+// 但 git 存在子进程（凭据输入窗口）时放行，等待用户输入
 static GitResult RunGit(const std::vector<std::wstring>& argv, const std::wstring& cwd, DWORD timeoutMs, DWORD idleMs = 0) {
     GitResult r;
     std::wstring cl;
@@ -326,14 +359,18 @@ static GitResult RunGit(const std::vector<std::wstring>& argv, const std::wstrin
                 break;
             }
             if (idleDeadline && GetTickCount64() > idleDeadline) {   // 无响应看门狗：网络挂死快速失败
-                TerminateProcess(pi.hProcess, 1);
-                CloseHandle(rd); CloseHandle(pi.hProcess);
-                r.rc = 1;
-                r.out = Fmt(L"[无响应 %u 秒，命令已终止]\n网络不通？可在顶部【代理配置】设置代理后重试。", idleMs / 1000);
-                return r;
+                if (HasChildProcess(pi.hProcess)) {                  // 有凭据输入等子窗口：等人操作，重置计时放行
+                    idleDeadline = GetTickCount64() + idleMs;
+                } else {
+                    KillGitTree(pi.hProcess);
+                    CloseHandle(rd); CloseHandle(pi.hProcess);
+                    r.rc = 1;
+                    r.out = Fmt(L"[无响应 %u 秒，命令已终止]\n网络不通？可在顶部【代理配置】设置代理后重试。", idleMs / 1000);
+                    return r;
+                }
             }
             if (GetTickCount64() > deadline) {
-                TerminateProcess(pi.hProcess, 1);
+                KillGitTree(pi.hProcess);
                 CloseHandle(rd); CloseHandle(pi.hProcess);
                 r.rc = 1; r.out = Fmt(L"[超时 %u 秒，命令已终止]", timeoutMs / 1000);
                 return r;
