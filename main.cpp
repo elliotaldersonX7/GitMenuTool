@@ -2253,11 +2253,11 @@ static void OpTagDel() {
     auto name = AskText(g_main, L"删除标签", L"要删除的标签名:");
     if (!name || name->empty()) return;
     if (!Confirm(g_main, Fmt(L"确认删除本地标签 [%s]？", name->c_str()))) return;
-    std::vector<std::vector<std::wstring>> cmds;
-    cmds.push_back(G({ L"tag", L"-d", *name }));
+    std::vector<JobCmd> cmds;
+    cmds.push_back({ G({ L"tag", L"-d", *name }), true });   // 本地可能早已删除（如上次远端推送失败只删成了本地），失败不阻断远端删除
     if (!g_remote.empty() && Confirm(g_main, Fmt(L"是否同时删除远端（%s）上的同名标签？", g_remote.c_str())))
-        cmds.push_back(G({ L"push", g_remote, L":refs/tags/" + *name }));
-    ExecV(cmds);
+        cmds.push_back({ G({ L"push", g_remote, L":refs/tags/" + *name }), false });
+    ExecAsync(std::move(cmds));
 }
 static void OpBranchSw() {
     if (!EnsureRepo()) return;
