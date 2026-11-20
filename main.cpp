@@ -58,6 +58,8 @@ namespace fs = std::filesystem;
 #define IDC_ABOUT_INFO  3003
 #define IDC_ABOUT_VER     3006
 #define IDC_ABOUT_LINK    3007
+#define IDC_ABOUT_RESULT  3008
+#define IDC_ABOUT_DL      3009
 #define IDM_BASE      2000
 
 // ============================ 全局 ==========================================
@@ -1312,7 +1314,6 @@ struct UpdateResult {
     bool rateLimit = false;        // kind=2 时区分：GitHub 匿名配额用尽 / 一般网络问题
 };
 static HWND g_hAboutDlg = nullptr;          // 关于弹窗（开着时检查结果写回弹窗）
-static HWND g_hAskDlg = nullptr;            // 检测到新版本二级弹窗（开着时下载进度写回其下载按钮）
 static std::atomic<bool> g_updateRunning{ false };
 static bool g_updateNagged = false;         // 自动检测的新版提示每会话只弹一次
 // 当前显示的版本（关于弹窗口径）：升级标记 > 仓库标签 > 内置版本号
@@ -1356,14 +1357,14 @@ static void CheckUpdateAsync(bool autoMode) {
         g_updateRunning = false;   // 线程内清零：自动弹窗的模态循环会卡住 handler，清零不能放 handler 里
     }).detach();
 }
-// 升级说明文本（限行数防超长）：检测到新版本二级弹窗的内容主体
+// 升级说明文本（限行数防弹窗过高：高度自适应仍设上限）：关于弹窗结果区的内容主体
 static std::wstring UpdateFoundText(const UpdateResult& r) {
-    std::wstring s = L"检测到新版本：" + r.tag + L"（当前 " + CurAppVersion() + L"）\n\n升级内容：\n";
+    std::wstring s = L"检测到新版本：" + r.tag + L"（当前 " + CurAppVersion() + L"）\n升级内容：\n";
     std::wstring body = r.notes.empty() ? L"（无详细说明）" : r.notes;
     int lines = 0; size_t cut = 0;
     for (size_t i = 0; i <= body.size(); ++i) {
         if (i == body.size() || body[i] == L'\n') {
-            if (++lines > 4) { body = body.substr(0, cut) + L"…（说明较长已截断，完整内容见发布页）"; break; }
+            if (++lines > 8) { body = body.substr(0, cut) + L"…（说明较长已截断，完整内容见发布页）"; break; }
             cut = i + 1;
         }
     }
@@ -1460,7 +1461,7 @@ static std::wstring DoUpgradeSwap(const std::wstring& tmpExe, const std::wstring
 }
 /**
   ******************************************************************************
-  * @brief    关于弹窗的过程：检查更新按钮 / 关闭
+  * @brief    关于弹窗的过程：检查更新 / 下载 / 关闭
   * @param    h 弹窗句柄
   * @param    data AboutState 指针
   * @retval   None
@@ -1469,124 +1470,78 @@ static std::wstring DoUpgradeSwap(const std::wstring& tmpExe, const std::wstring
   */
 struct AboutState {
     bool done = false;
+    bool downloading = false;                         // 新版下载进行中（下载按钮显示百分比）
+    std::wstring dlUrl, dlTag;                        // 新版 exe 直链与标签（点下载时用）
     int w = 0, ch = 0, m = 0, bw = 0, btnH = 0, gap = 0;
     int linkY = 0, linkH = 0;                         // github 发布页链接行基线/高度（紧贴按钮行上方）
     int y1 = 0;                                       // 按钮行基线（检查更新）
 };
 static AboutState g_aboutState;
-// 下载进度：后台线程投递百分比到主线程（写回二级弹窗的下载按钮）
+// 下载进度：后台线程投递百分比到主线程（写回关于弹窗的下载按钮）
 static void PostDlPct(int pct) { PostMessageW(g_main, WM_APP_DLPCT, (WPARAM)pct, 0); }
-// 二级弹窗（检测到新版本）状态：done=已关闭 downloading=已开始下载（按钮原地显示百分比）
-struct UpdateAskState {
-    bool done = false, downloading = false;
-    std::wstring url;                                 // 新版 exe 直链（点下载时用）
-    std::wstring tag;                                 // 新版标签（写升级标记用）
-};
 /**
   ******************************************************************************
-  * @brief    检测到新版本二级弹窗的命令处理：下载 / 忽略 / 关闭
-  * @param    h 二级弹窗句柄
-  * @param    data UpdateAskState 指针（创建弹窗时挂入）
-  * @retval   None
-  * @note     下载开始后弹窗不关：忽略钮禁用、下载钮原地变百分比；进度经 WM_APP_DLPCT
-  *           写回，完成后 WM_APP_UPGRADE 关闭本弹窗再走换身/失败提示
-  ******************************************************************************
-  */
-static LRESULT CALLBACK UpdateAskSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
-    UpdateAskState* st = (UpdateAskState*)data;
-    switch (m) {
-    case WM_COMMAND: {
-        int id = LOWORD(w);
-        if (id == IDYES && !st->downloading) {         // 下载：弹窗保持，按钮原地变百分比
-            st->downloading = true;
-            EnableWindow(GetDlgItem(h, IDNO), FALSE);  // 下载中不可再点忽略
-            SetWindowTextW(GetDlgItem(h, IDYES), L"0%");
-            DownloadAsync(st->url, st->tag, PostDlPct);
-            return 0;
-        }
-        if (id == IDNO || id == IDCANCEL) { st->done = true; DestroyWindow(h); return 0; }
-        return 0;
-    }
-    case WM_DESTROY:
-        g_hAskDlg = nullptr;
-        return 0;
-    case WM_CLOSE:
-        st->done = true;
-        DestroyWindow(h);
-        return 0;
-    }
-    return DefSubclassProc(h, m, w, l);
-}
-/**
-  ******************************************************************************
-  * @brief    二级弹窗：检测到新版本，提供 下载/忽略 两个按钮
-  * @param    parent 父窗口（关于弹窗或主窗，弹窗期间被禁用）
+  * @brief    在关于弹窗内集成新版信息：新版本号 + 升级内容 + 下载按钮，弹窗高度自适应
+  * @param    dlg 关于弹窗句柄
   * @param    r 检查结果（kind=0 时调用）
   * @retval   None
-  * @note     高度按说明文字实测换行行数自适应；点下载后弹窗保持，下载按钮原地显示
-  *           百分比，下载结束由 WM_APP_UPGRADE 关闭本弹窗并收尾
+  * @note     升级内容按弹窗宽实测换行高度；点下载后弹窗保持，下载按钮原地显示百分比，
+  *           下载结束由 WM_APP_UPGRADE 恢复按钮并收尾
   ******************************************************************************
   */
-static void UpdateAskPopup(HWND parent, const UpdateResult& r) {
-    std::wstring text = UpdateFoundText(r)
-        + L"\n\n是否下载新版本并自动重启工具？\n（若杀毒软件拦截 exe 替换，请选择允许后重试）";
-    int m = (int)(12 * g_scale), btnH = (int)(26 * g_scale), bw = (int)(80 * g_scale), gap = (int)(8 * g_scale);
-    int w = (int)(300 * g_scale), tw = w - 2 * m;
-    HDC dc = GetDC(nullptr);                                  // 实测说明文字换行后所需高度
+static void ShowUpdateInAbout(HWND dlg, const UpdateResult& r) {
+    AboutState& s = g_aboutState;
+    std::wstring text = UpdateFoundText(r);
+    HDC dc = GetDC(nullptr);                                   // 升级内容按弹窗宽实测换行后所需高度
     HFONT of = (HFONT)SelectObject(dc, g_fontUISmall);
-    RECT tr = { 0, 0, tw, 0 };
+    RECT tr = { 0, 0, s.w - 2 * s.m, 0 };
     DrawTextW(dc, text.c_str(), -1, &tr, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
     SelectObject(dc, of); ReleaseDC(nullptr, dc);
-    int th = tr.bottom - tr.top;
-    int ch = m + th + (int)(14 * g_scale) + btnH + m;
-    RECT rcFrame = { 0, 0, w, ch };
-    AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
-    int ww = rcFrame.right - rcFrame.left, wh = rcFrame.bottom - rcFrame.top;
-    RECT pr; GetWindowRect(parent, &pr);
-    int x = pr.left + ((pr.right - pr.left) - ww) / 2, y = pr.top + ((pr.bottom - pr.top) - wh) / 2;
-    if (x < 0) x = 0; if (y < 0) y = 0;
-    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", L"检查更新",
-        WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, parent, nullptr, g_hInst, nullptr);
-    HWND hText = CreateWindowExW(0, L"STATIC", text.c_str(), WS_CHILD | WS_VISIBLE | SS_NOPREFIX,
-        m, m, tw, th, dlg, nullptr, g_hInst, nullptr);
-    int by = m + th + (int)(14 * g_scale);
-    HWND hGo = CreateWindowExW(0, L"BUTTON", L"下载", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-        (w - 2 * bw - gap) / 2, by, bw, btnH, dlg, (HMENU)IDYES, g_hInst, nullptr);
-    HWND hNo = CreateWindowExW(0, L"BUTTON", L"忽略", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        (w - 2 * bw - gap) / 2 + bw + gap, by, bw, btnH, dlg, (HMENU)IDNO, g_hInst, nullptr);
-    SendMessageW(hText, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
-    SendMessageW(hGo, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
-    SendMessageW(hNo, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
-    UpdateAskState st;
-    st.url = r.exeUrl;
-    st.tag = r.tag;
-    SetWindowSubclass(dlg, UpdateAskSub, 1, (DWORD_PTR)&st);
-    EnableWindow(parent, FALSE);
-    g_hAskDlg = dlg;
-    ShowWindow(dlg, SW_SHOW);
-    SetFocus(hGo);
-    MSG msg;
-    while (!st.done && GetMessageW(&msg, nullptr, 0, 0)) {
-        if (IsDialogMessageW(dlg, &msg)) continue;
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    int textH = tr.bottom - tr.top;
+    int gap = (int)(6 * g_scale);
+    int yText = s.y1 + s.btnH + gap;                           // 结果文本区顶（检查更新按钮下方）
+    int yDl = yText + textH + gap;                             // 下载按钮顶
+    int needCh = yDl + s.btnH + s.m;                           // 弹窗所需客户区高
+    HWND hText = GetDlgItem(dlg, IDC_ABOUT_RESULT);
+    HWND hDl = GetDlgItem(dlg, IDC_ABOUT_DL);
+    if (!hText) {                                              // 首次：创建结果区控件
+        hText = CreateWindowExW(0, L"STATIC", text.c_str(),
+            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOPREFIX, s.m, yText, s.w - 2 * s.m, textH,
+            dlg, (HMENU)IDC_ABOUT_RESULT, g_hInst, nullptr);
+        hDl = CreateWindowExW(0, L"BUTTON", L"下载", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            (s.w - s.bw) / 2, yDl, s.bw, s.btnH, dlg, (HMENU)IDC_ABOUT_DL, g_hInst, nullptr);
+        SendMessageW(hText, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
+        SendMessageW(hDl, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
+    } else {                                                   // 再次检查：更新文本与位置
+        SetWindowTextW(hText, text.c_str());
+        MoveWindow(hText, s.m, yText, s.w - 2 * s.m, textH, TRUE);
+        MoveWindow(hDl, (s.w - s.bw) / 2, yDl, s.bw, s.btnH, TRUE);
+        SetWindowTextW(hDl, L"下载");
+        EnableWindow(hDl, TRUE);
     }
-    EnableWindow(parent, TRUE);
-    SetActiveWindow(parent);
+    s.dlUrl = r.exeUrl;
+    s.dlTag = r.tag;
+    s.downloading = false;
+    if (needCh != s.ch) {                                      // 弹窗高度自适应
+        RECT fr; GetWindowRect(dlg, &fr);
+        SetWindowPos(dlg, nullptr, 0, 0, fr.right - fr.left, fr.bottom - fr.top + (needCh - s.ch),
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        s.ch = needCh;
+    }
 }
 /**
   ******************************************************************************
-  * @brief    关于弹窗回填检查结果：已最新/新版本走二级弹窗，失败原因写状态区
+  * @brief    关于弹窗回填检查结果：新版本集成进弹窗，已最新/失败弹提示框
   * @param    dlg 关于弹窗句柄
   * @param    r 检查结果（kind 0=新版本 1=已最新 2=失败）
   * @retval   None
-  * @note     启动自动弹窗与异步回填共用；选下载时占用状态区与检查按钮，完成后 WM_APP_UPGRADE 恢复
+  * @note     启动自动弹窗与异步回填共用；下载进度显示在下载按钮上，完成后恢复按钮
   ******************************************************************************
   */
 static void AboutApplyResult(HWND dlg, const UpdateResult& r) {
     HWND hCheck = GetDlgItem(dlg, IDC_ABOUT_CHECK);
     if (r.kind == 0) {
-        UpdateAskPopup(dlg, r);        // 选择框：点下载后弹窗保持，下载按钮原地显示百分比
+        ShowUpdateInAbout(dlg, r);     // 新版本号+升级内容+下载按钮，弹窗高度自适应
     } else if (r.kind == 1) {
         MessageBoxW(dlg, L"已是最新版本。", L"检查更新", MB_OK | MB_ICONINFORMATION);   // 已最新：只弹提示框
     } else {
@@ -1611,6 +1566,13 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
             CheckUpdateAsync(false);
             return 0;
         }
+        if (id == IDC_ABOUT_DL && !st->downloading) {  // 下载：弹窗保持，下载按钮原地变百分比
+            st->downloading = true;
+            EnableWindow(GetDlgItem(h, IDC_ABOUT_CHECK), FALSE);
+            SetWindowTextW(GetDlgItem(h, IDC_ABOUT_DL), L"0%");
+            DownloadAsync(st->dlUrl, st->dlTag, PostDlPct);
+            return 0;
+        }
         if (id == IDCANCEL) { st->done = true; DestroyWindow(h); return 0; }
         return 0;
     }
@@ -1626,13 +1588,13 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
 }
 /**
   ******************************************************************************
-  * @brief    关于弹窗：工具名 + 当前版本 + 作者 + github发布页链接 + 检查更新
-  * @param    None
+  * @brief    关于弹窗：工具名 + 当前版本 + 作者 + github发布页链接 + 检查更新（+新版结果区）
+  * @param    pre 非空时预填检查结果（自动检测弹出版），可传 nullptr
   * @retval   None
-  * @note     模态骨架与 AskText 相同（子类过程收命令 + 循环只泵消息）；仅用户手动点击时打开
+  * @note     模态骨架与 AskText 相同（子类过程收命令 + 循环只泵消息）；自动检测也只弹本窗
   ******************************************************************************
   */
-static void ShowAboutDialog() {
+static void ShowAboutDialog(const UpdateResult* pre) {
     AboutState& s = g_aboutState;
     s.done = false;
     s.m = (int)(10 * g_scale); s.btnH = (int)(26 * g_scale);
@@ -1678,6 +1640,7 @@ static void ShowAboutDialog() {
     EnableWindow(g_main, FALSE);
     g_hAboutDlg = dlg;
     ShowWindow(dlg, SW_SHOW);
+    if (pre) AboutApplyResult(dlg, *pre);   // 自动检测到新版：结果直接集成在弹窗内（无二级弹窗）
     MSG msg;
     while (!s.done && GetMessageW(&msg, nullptr, 0, 0)) {
         if (IsDialogMessageW(dlg, &msg)) continue;
@@ -3232,7 +3195,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id == IDC_OPENIGN) { OpOpenIgnore(); return 0; }
         if (id == IDC_RESET) { OpResetGit(); return 0; }
         if (id == IDM_CLONE) { OpClone(); return 0; }
-        if (id == IDC_ABOUT) { ShowAboutDialog(); return 0; }
+        if (id == IDC_ABOUT) { ShowAboutDialog(nullptr); return 0; }
         if (id >= IDM_BASE && id < IDM_BASE + 100) {
             for (auto& cat : MENU)
                 for (auto& item : cat.items)
@@ -3271,49 +3234,57 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         InvalidateRect(g_leftPanel, nullptr, FALSE);   // g_flowBlock 可能变化，左栏灰/亮态同步重绘
         return 0;
     case WM_APP_UPDATE: {
-        // 检查更新结果：弹窗开着→回填（已最新/新版本弹二级框，下载提示在按钮上）；否则自动模式发现新版→直接弹二级选择框（每会话一次），其余静默
+        // 检查更新结果：弹窗开着→结果集成进弹窗（新版本号+升级内容+下载按钮，高度自适应）；
+        // 否则自动模式发现新版→弹"关于"（每会话一次），其余静默
         UpdateResult* r = (UpdateResult*)w;
         bool autoMode = l != 0;
         if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
             AboutApplyResult(g_hAboutDlg, *r);
         } else if (autoMode && r->kind == 0 && !g_updateNagged) {
             g_updateNagged = true;   // 本次会话不再自动弹，手动检查仍可用
-            UpdateAskPopup(g_main, *r);   // 不弹"关于"，只弹选择框；下载百分比显示在下载按钮上
+            ShowAboutDialog(r);
         }
         delete r;
         return 0;
     }
     case WM_APP_DLPCT:
-        // 下载进度：写回二级弹窗的下载按钮（弹窗已关则丢弃）
-        if (g_hAskDlg && IsWindow(g_hAskDlg))
-            SetWindowTextW(GetDlgItem(g_hAskDlg, IDYES), (std::to_wstring((int)w) + L"%").c_str());
+        // 下载进度：写回关于弹窗的下载按钮（弹窗已关则丢弃）
+        if (g_hAboutDlg && IsWindow(g_hAboutDlg))
+            SetWindowTextW(GetDlgItem(g_hAboutDlg, IDC_ABOUT_DL), (std::to_wstring((int)w) + L"%").c_str());
         return 0;
     case WM_APP_UPGRADE: {
-        // 升级结果：ok 时 msg=新 exe 临时路径 → 换身 + 自动重启；失败弹提示框（关于弹窗开着则挂它，否则挂主窗）
-        if (g_hAskDlg && IsWindow(g_hAskDlg)) SendMessageW(g_hAskDlg, WM_CLOSE, 0, 0);   // 先关进度弹窗
+        // 升级结果：ok 时 msg=新 exe 临时路径 → 换身 + 自动重启；失败恢复按钮并弹提示框（弹窗开着挂它，否则挂主窗）
         UpgradeResult* ur = (UpgradeResult*)w;
         if (ur->ok) {
             std::wstring err = DoUpgradeSwap(ur->msg, ur->tag);
             if (err.empty()) {
-                ExitProcess(0);   // 新 exe 已启动。不能依赖 WM_CLOSE/PostQuitMessage：自动弹窗的嵌套模态循环会吞掉唯一一条 WM_QUIT，外层消息循环收不到、进程退不掉
+                ExitProcess(0);   // 新 exe 已启动。不能依赖 WM_CLOSE/PostQuitMessage：模态循环会吞掉唯一一条 WM_QUIT，外层消息循环收不到、进程退不掉
             }
             std::wstring t = L"升级失败：" + err + L"\n可到 github 发布页手动下载安装。";
             if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
                 HWND hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_CHECK);
-                EnableWindow(hBtn, TRUE);
-                SetWindowTextW(hBtn, L"检查更新");
+                EnableWindow(hBtn, TRUE); SetWindowTextW(hBtn, L"检查更新");
+                hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_DL);
+                if (hBtn) { EnableWindow(hBtn, TRUE); SetWindowTextW(hBtn, L"下载"); }
+                g_aboutState.downloading = false;
+                MessageBoxW(g_hAboutDlg, t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
+                delete ur;
+                return 0;
             }
-            MessageBoxW((g_hAboutDlg && IsWindow(g_hAboutDlg)) ? g_hAboutDlg : g_main,
-                        t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
+            MessageBoxW(g_main, t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
         } else {
             std::wstring t = L"升级失败：" + ur->msg + L"\n可到 github 发布页手动下载安装。";
             if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
                 HWND hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_CHECK);
-                EnableWindow(hBtn, TRUE);
-                SetWindowTextW(hBtn, L"检查更新");
+                EnableWindow(hBtn, TRUE); SetWindowTextW(hBtn, L"检查更新");
+                hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_DL);
+                if (hBtn) { EnableWindow(hBtn, TRUE); SetWindowTextW(hBtn, L"下载"); }
+                g_aboutState.downloading = false;
+                MessageBoxW(g_hAboutDlg, t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
+                delete ur;
+                return 0;
             }
-            MessageBoxW((g_hAboutDlg && IsWindow(g_hAboutDlg)) ? g_hAboutDlg : g_main,
-                        t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
+            MessageBoxW(g_main, t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
         }
         delete ur;
         return 0;
