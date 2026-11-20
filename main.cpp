@@ -1318,20 +1318,10 @@ struct UpdateResult {
 static HWND g_hAboutDlg = nullptr;          // 关于弹窗（开着时检查结果写回弹窗）
 static std::atomic<bool> g_updateRunning{ false };
 static bool g_updateNagged = false;         // 自动检测的新版提示每会话只弹一次
-// 当前显示的版本：HEAD 精确仓库标签 > 升级标记 > 内置版本号
-// - 开发机：HEAD 打了 tag 即以仓库标签为准（比升级标记新，打 tag 后重编译立即生效）
-// - 对外用户：目录无仓库取不到仓库标签，回退升级标记/构建时注入的 APP_VERSION
+// 当前显示的版本：HEAD 精确仓库标签（开发机）> 构建时注入的 APP_VERSION（对外用户）
+// APP_VERSION 由 build.bat 从 git describe 注入、随 exe 换身自动更新，无需外部状态
 static std::wstring CurAppVersion() {
     if (!g_repoTag.empty()) return g_repoTag;
-    wchar_t exePath[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    std::wifstream f(fs::path(exePath).parent_path() / L"GitMenuTool.ver");
-    if (f) {
-        std::wstring t;
-        std::getline(f, t);
-        t = Trim(t);
-        if (!t.empty()) return t;
-    }
     return std::wstring(APP_VERSION);
 }
 /**
@@ -1354,7 +1344,10 @@ static bool CheckUpdateAsync(bool autoMode) {
         if (!tag.empty()) {
             r->tag = tag;
             r->notes = JsonUnescape(JsonGetStringRaw(json, "body"));
-            r->kind = VersionCompare(tag, CurAppVersion()) > 0 ? 0 : 1;
+            // 当前版本是该 tag 的后继开发串（tag-N-gxxx，HEAD 已越过发布 tag 未发新版）时视为已最新
+            std::wstring cur = CurAppVersion();
+            bool devAhead = cur.rfind(tag + L"-", 0) == 0;
+            r->kind = (!devAhead && VersionCompare(tag, cur) > 0) ? 0 : 1;
             if (r->kind == 0) r->exeUrl = JsonGetAssetExe(json);
         }   // 其余保持 kind=2（网络失败/限流）
         PostMessageW(g_main, WM_APP_UPDATE, (WPARAM)r, (LPARAM)(autoMode ? 1 : 0));
@@ -1379,26 +1372,23 @@ static std::wstring UpdateFoundText(const UpdateResult& r) {
 struct UpgradeResult {
     bool ok = false;
     std::wstring msg;              // ok=新 exe 临时文件路径；!ok=失败原因
-    std::wstring tag;              // 本次下载的新版标签（换身成功后写入升级标记）
 };
 static std::atomic<bool> g_upgrading{ false };
 /**
   ******************************************************************************
   * @brief    后台线程下载新版本 exe 到 %TEMP%
   * @param    url exe 附件直链（调用前应确认 g_updateRunning 已被本函数占用）
-  * @param    tag 本次下载的新版标签（随结果带回，换身成功后写升级标记）
   * @param    onPct 下载进度回调（百分比 0~100，可为 nullptr）
   * @retval   true=已启动下载；false=已有检查/下载在进行，本次未启动
   * @note     结果经 WM_APP_UPGRADE 投递主线程执行换身；>100KB 防把错误页当 exe；
   *           下载期间占用 g_updateRunning，挡住定时自动检查插队
   ******************************************************************************
   */
-static bool DownloadAsync(const std::wstring& url, const std::wstring& tag = L"", void (*onPct)(int) = nullptr) {
+static bool DownloadAsync(const std::wstring& url, void (*onPct)(int) = nullptr) {
     bool expected = false;
     if (!g_updateRunning.compare_exchange_strong(expected, true)) return false;   // 已有检查/下载在进行
-    std::thread([url, tag, onPct]() {
+    std::thread([url, onPct]() {
         auto* ur = new UpgradeResult();
-        ur->tag = tag;
         std::string data = HttpDownload(url, onPct);
         if (data.size() > 100 * 1024) {   // exe 至少几百 KB，防 403/404 错误页被误存
             wchar_t tmp[MAX_PATH] = {};
@@ -1421,13 +1411,12 @@ static bool DownloadAsync(const std::wstring& url, const std::wstring& tag = L""
   ******************************************************************************
   * @brief    换身：当前 exe 改名 .old 让位 → 新 exe 顶上原位 → 延迟删 .old → 重启新 exe
   * @param    tmpExe 已下载的新版本 exe 临时路径
-  * @param    newTag 新版标签（非空时写入升级标记文件，供重启后识别版本）
   * @retval   空串=成功已安排重启；否则返回失败原因（.old 已回滚原名）
   * @note     Windows 允许改名运行中的 exe；跨卷移动需 MOVEFILE_COPY_ALLOWED；
   *           杀软可能短暂锁文件，各步 5 次×300ms 重试
   ******************************************************************************
   */
-static std::wstring DoUpgradeSwap(const std::wstring& tmpExe, const std::wstring& newTag = L"") {
+static std::wstring DoUpgradeSwap(const std::wstring& tmpExe) {
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     fs::path cur(exePath), oldf = cur; oldf.replace_extension(L".old");
@@ -1447,10 +1436,6 @@ static std::wstring DoUpgradeSwap(const std::wstring& tmpExe, const std::wstring
     if (!ok) {   // 回滚：把 .old 改回原名，工具不受影响
         MoveFileExW(oldf.c_str(), cur.c_str(), MOVEFILE_COPY_ALLOWED);
         return L"新版本文件就位失败，已恢复原版本";
-    }
-    if (!newTag.empty()) {   // 写升级标记：本地仓库标签不随换身变化，重启后据此识别新版本
-        std::ofstream vf(cur.parent_path() / L"GitMenuTool.ver", std::ios::binary | std::ios::trunc);
-        if (vf) vf << std::string(newTag.begin(), newTag.end());   // 标签为 ASCII，按窄字符落盘
     }
     // ③ 延迟 2 秒删除 .old（当前进程还占着映像）
     STARTUPINFOW si = { sizeof(si) }; si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
@@ -1480,7 +1465,7 @@ static std::wstring DoUpgradeSwap(const std::wstring& tmpExe, const std::wstring
 struct AboutState {
     bool done = false;
     bool downloading = false;                         // 新版下载进行中（下载按钮显示百分比）
-    std::wstring dlUrl, dlTag;                        // 新版 exe 直链与标签（点下载时用）
+    std::wstring dlUrl;                               // 新版 exe 直链（点下载时用）
     int w = 0, ch = 0, m = 0, bw = 0, btnH = 0, gap = 0;
     int linkY = 0, linkH = 0;                         // github 发布页链接行基线/高度（紧贴按钮行上方）
     int y1 = 0;                                       // 按钮行基线（检查更新）
@@ -1495,14 +1480,13 @@ static void PostDlPct(int pct) { PostMessageW(g_main, WM_APP_DLPCT, (WPARAM)pct,
   * @param    text 结果文本（居中，自动换行）
   * @param    showDl true=显示下载按钮（检测到新版本时）
   * @param    dlUrl 新版 exe 直链（showDl 时有效）
-  * @param    dlTag 新版标签（showDl 时有效，换身成功后写升级标记）
   * @retval   None
   * @note     文本按弹窗宽实测换行高度；点下载后弹窗保持，下载按钮原地显示百分比，
   *           下载结束由 WM_APP_UPGRADE 恢复按钮并收尾
   ******************************************************************************
   */
 static void ShowResultInAbout(HWND dlg, const std::wstring& text, bool showDl,
-                              const std::wstring& dlUrl = L"", const std::wstring& dlTag = L"") {
+                              const std::wstring& dlUrl = L"") {
     AboutState& s = g_aboutState;
     HDC dc = GetDC(nullptr);                                   // 结果文本按弹窗宽实测换行后所需高度
     HFONT of = (HFONT)SelectObject(dc, g_fontUISmall);
@@ -1538,7 +1522,6 @@ static void ShowResultInAbout(HWND dlg, const std::wstring& text, bool showDl,
         }
         ShowWindow(hDl, SW_SHOW);
         s.dlUrl = dlUrl;
-        s.dlTag = dlTag;
     } else if (hDl) {                                          // 无下载：隐藏按钮
         ShowWindow(hDl, SW_HIDE);
     }
@@ -1562,7 +1545,7 @@ static void ShowResultInAbout(HWND dlg, const std::wstring& text, bool showDl,
 static void AboutApplyResult(HWND dlg, const UpdateResult& r) {
     HWND hCheck = GetDlgItem(dlg, IDC_ABOUT_CHECK);
     if (r.kind == 0) {
-        ShowResultInAbout(dlg, UpdateFoundText(r), true, r.exeUrl, r.tag);   // 新版本号+升级内容+下载
+        ShowResultInAbout(dlg, UpdateFoundText(r), true, r.exeUrl);   // 新版本号+升级内容+下载
     } else if (r.kind == 1) {
         ShowResultInAbout(dlg, L"已是最新版本。", false);                      // 已最新：结果区显示
     } else {
@@ -1604,7 +1587,7 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
             return 0;
         }
         if (id == IDC_ABOUT_DL && !st->downloading) {      // 下载：弹窗保持，下载按钮原地变百分比
-            if (!DownloadAsync(st->dlUrl, st->dlTag, PostDlPct)) return 0;   // 已有任务在进行：忽略本次点击
+            if (!DownloadAsync(st->dlUrl, PostDlPct)) return 0;   // 已有任务在进行：忽略本次点击
             st->downloading = true;
             EnableWindow(GetDlgItem(h, IDC_ABOUT_CHECK), FALSE);
             SetWindowTextW(GetDlgItem(h, IDC_ABOUT_DL), L"0%");
@@ -3294,7 +3277,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         // 升级结果：ok 时 msg=新 exe 临时路径 → 换身 + 自动重启；失败恢复按钮并弹提示框（弹窗开着挂它，否则挂主窗）
         UpgradeResult* ur = (UpgradeResult*)w;
         if (ur->ok) {
-            std::wstring err = DoUpgradeSwap(ur->msg, ur->tag);
+            std::wstring err = DoUpgradeSwap(ur->msg);
             if (err.empty()) {
                 ExitProcess(0);   // 新 exe 已启动。不能依赖 WM_CLOSE/PostQuitMessage：模态循环会吞掉唯一一条 WM_QUIT，外层消息循环收不到、进程退不掉
             }
@@ -3371,13 +3354,15 @@ static HFONT MkFont(int pt, bool bold, const wchar_t* face) {
 static void CleanupOldExe() {
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    fs::path dir = fs::path(exePath).parent_path();
+    std::error_code ec;
     fs::path oldf = fs::path(exePath);
     oldf.replace_extension(L".old");
-    std::error_code ec;
-    for (int i = 0; i < 5 && fs::exists(oldf, ec); ++i) {
+    for (int i = 0; i < 5 && fs::exists(oldf, ec); ++i) {   // 上次升级的 .old 兜底删除
         fs::remove(oldf, ec);
         if (fs::exists(oldf, ec)) Sleep(300);
     }
+    fs::remove(dir / L"GitMenuTool.ver", ec);               // 清理已废弃的升级标记（历史遗留）
 }
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_hInst = hInst;
