@@ -2703,8 +2703,8 @@ static LRESULT CALLBACK ProxyDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
     }
     case WM_CTLCOLORSTATIC: {
         HDC dc = (HDC)w;
-        if ((HWND)l == st->hDetect) {                     // 检测结果行：底色取弹窗实际擦底画刷（避免白底）
-            SetTextColor(dc, RGB(0x44, 0x44, 0x44));
+        if ((HWND)l == st->hDetect) {                     // 检测结果行：灰字，底色取弹窗实际擦底画刷（避免白底）
+            SetTextColor(dc, STAT_DIM);
             SetBkMode(dc, TRANSPARENT);
             return (LRESULT)SendMessageW(h, WM_CTLCOLORDLG, (WPARAM)dc, (LPARAM)h);
         }
@@ -2732,7 +2732,7 @@ static std::optional<std::wstring> AskProxy(HWND parent, bool on,
     int x = pr.left + ((pr.right - pr.left) - ww) / 2, y = pr.top + ((pr.bottom - pr.top) - wh) / 2;
     if (x < 0) x = 0; if (y < 0) y = 0;
     ProxyState st;
-    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", L"代理配置（仅对 github.com 生效，内网 Gitea 恒为直连）",
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", L"代理配置",
         WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, parent, nullptr, g_hInst, nullptr);
     st.hChk = CreateWindowExW(0, L"BUTTON", L"启用代理", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
         m, m, [&]{   // 控件宽=文字实测+方框余量：勾选命中区只覆盖方框与文字，整行其余位置点击无效
@@ -2742,7 +2742,7 @@ static std::optional<std::wstring> AskProxy(HWND parent, bool on,
             SelectObject(dc, of); ReleaseDC(parent, dc);
             return sz.cx + (int)(26 * g_scale);
         }(), chkH, dlg, (HMENU)200, g_hInst, nullptr);
-    HWND hLbl = CreateWindowExW(0, L"STATIC", L"代理地址（如 http://127.0.0.1:7890）:", WS_CHILD | WS_VISIBLE,
+    HWND hLbl = CreateWindowExW(0, L"STATIC", L"代理地址:", WS_CHILD | WS_VISIBLE,
         m, m + chkH + (int)(8 * g_scale), w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
     st.hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", addr.c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, m, m + chkH + (int)(8 * g_scale) + lblH, w - 2 * m, editH,
@@ -2757,6 +2757,7 @@ static std::optional<std::wstring> AskProxy(HWND parent, bool on,
         w - (int)(80 * g_scale) - m, ch - m - btnH, (int)(80 * g_scale), btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
     for (HWND c : { st.hChk, hLbl, st.hEdit, st.hDetect, hOk, hCancel })
         SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(st.hDetect, WM_SETFONT, (WPARAM)g_fontMenu, TRUE);   // 检测结果行：比 UI 小 2 号
     SendMessageW(st.hChk, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
     EnableWindow(st.hEdit, on);
     SetWindowSubclass(dlg, ProxyDlgSub, 1, (DWORD_PTR)&st);
