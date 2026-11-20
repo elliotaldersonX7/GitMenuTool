@@ -2735,7 +2735,13 @@ static std::optional<std::wstring> AskProxy(HWND parent, bool on,
     HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", L"代理配置（仅对 github.com 生效，内网 Gitea 恒为直连）",
         WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, parent, nullptr, g_hInst, nullptr);
     st.hChk = CreateWindowExW(0, L"BUTTON", L"启用代理", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-        m, m, w - 2 * m, chkH, dlg, (HMENU)200, g_hInst, nullptr);
+        m, m, [&]{   // 控件宽=文字实测+方框余量：勾选命中区只覆盖方框与文字，整行其余位置点击无效
+            HDC dc = GetDC(parent);
+            HFONT of = (HFONT)SelectObject(dc, g_fontUI);
+            SIZE sz; GetTextExtentPoint32W(dc, L"启用代理", 4, &sz);
+            SelectObject(dc, of); ReleaseDC(parent, dc);
+            return sz.cx + (int)(26 * g_scale);
+        }(), chkH, dlg, (HMENU)200, g_hInst, nullptr);
     HWND hLbl = CreateWindowExW(0, L"STATIC", L"代理地址（如 http://127.0.0.1:7890）:", WS_CHILD | WS_VISIBLE,
         m, m + chkH + (int)(8 * g_scale), w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
     st.hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", addr.c_str(),
@@ -2743,8 +2749,8 @@ static std::optional<std::wstring> AskProxy(HWND parent, bool on,
         dlg, (HMENU)101, g_hInst, nullptr);
     st.hDetect = CreateWindowExW(0, L"EDIT",
         (detected.empty() ? L"未检测到本地代理，可手动填写" : L"检测到本地代理：" + detected).c_str(),
-        WS_CHILD | WS_VISIBLE | ES_READONLY | ES_AUTOHSCROLL, m, m + chkH + (int)(8 * g_scale) + lblH + editH + (int)(10 * g_scale), w - 2 * m, tipH,
-        dlg, nullptr, g_hInst, nullptr);   // 只读编辑框：检测结果可拖选复制
+        WS_CHILD | WS_VISIBLE | ES_READONLY | ES_MULTILINE, m, m + chkH + (int)(8 * g_scale) + lblH + editH + (int)(10 * g_scale), w - 2 * m, tipH,
+        dlg, nullptr, g_hInst, nullptr);   // 只读编辑框：检测结果可拖选复制；多行模式无横向自动滚，选区不抖动
     HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
         w - 2 * (int)(80 * g_scale) - m, ch - m - btnH, (int)(80 * g_scale), btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
     HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
