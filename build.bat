@@ -27,7 +27,7 @@ if defined APPTAG (
 )
 cl /nologo /std:c++17 /utf-8 /EHsc /MT /W3 /O2 /DUNICODE /D_UNICODE main.cpp ^
    /Fe:GitMenuTool.exe ^
-   /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:app.manifest user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib wininet.lib
+   /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:app.manifest user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib wininet.lib advapi32.lib
 if errorlevel 1 (
     echo [X] build failed
     exit /b 1

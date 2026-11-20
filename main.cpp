@@ -2645,22 +2645,136 @@ static void OpClone() {
     g_busy = false;
     RefreshStatusAsync();
 }
-// 代理配置：仅对 github.com 生效（内网 Gitea 的直连覆盖不受影响）；留空提交=清除代理恢复直连
+// 代理自动识别：依次取 Windows 系统代理（代理客户端"系统代理"模式写入的 WinINet 设置）与环境变量
+static std::wstring DetectProxy() {
+    std::wstring s;
+    HKEY k = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+                      0, KEY_READ, &k) == ERROR_SUCCESS) {
+        DWORD en = 0, sz = sizeof(en);
+        if (RegQueryValueExW(k, L"ProxyEnable", nullptr, nullptr, (LPBYTE)&en, &sz) == ERROR_SUCCESS && en) {
+            wchar_t buf[512] = {}; sz = sizeof(buf);
+            if (RegQueryValueExW(k, L"ProxyServer", nullptr, nullptr, (LPBYTE)buf, &sz) == ERROR_SUCCESS && buf[0]) {
+                s = buf;
+                if (s.find(L'=') == std::wstring::npos && s.find(L"://") == std::wstring::npos)
+                    s = L"http://" + s;   // "127.0.0.1:7890" 形态补协议头
+            }
+        }
+        RegCloseKey(k);
+    }
+    if (s.empty()) {
+        const wchar_t* e = _wgetenv(L"http_proxy");
+        if (!e || !*e) e = _wgetenv(L"https_proxy");
+        if (e && *e) s = e;
+    }
+    return s;
+}
+// 代理配置弹窗状态：开关 + 地址框 + 识别结果提示；OK 时 result=空串(关闭)/地址(启用)，nullopt=取消
+struct ProxyState {
+    HWND hChk = nullptr, hEdit = nullptr, hDetect = nullptr;
+    bool done = false;
+    std::optional<std::wstring> result;
+};
+static LRESULT CALLBACK ProxyDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
+    ProxyState* st = (ProxyState*)data;
+    switch (m) {
+    case WM_COMMAND: {
+        int id = LOWORD(w), code = HIWORD(w);
+        if (id == 200 && code == BN_CLICKED) {          // 开关切换：启用才可编辑地址
+            EnableWindow(st->hEdit, SendMessageW(st->hChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            return 0;
+        }
+        if (id == IDOK || id == IDCANCEL) {
+            if (id == IDOK) {
+                if (SendMessageW(st->hChk, BM_GETCHECK, 0, 0) != BST_CHECKED) st->result = std::wstring();
+                else {
+                    int len = GetWindowTextLengthW(st->hEdit);
+                    std::wstring s(len, L'\0');
+                    GetWindowTextW(st->hEdit, &s[0], len + 1);
+                    s = Trim(s);
+                    if (s.empty()) { Warn(h, L"已启用但代理地址为空：请填写地址，或取消勾选。"); return 0; }
+                    st->result = s;
+                }
+            } else st->result = std::nullopt;
+            st->done = true;
+            DestroyWindow(h);
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        st->done = true; st->result = std::nullopt;
+        DestroyWindow(h);
+        return 0;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+// 代理配置弹窗：on=当前是否启用，addr=预填地址（一般传自动识别结果），detected=识别结果提示文本
+static std::optional<std::wstring> AskProxy(HWND parent, bool on,
+                                            const std::wstring& addr, const std::wstring& detected) {
+    int m = (int)(14 * g_scale), lblH = (int)(20 * g_scale), editH = (int)(24 * g_scale);
+    int chkH = (int)(22 * g_scale), btnH = (int)(28 * g_scale), tipH = (int)(18 * g_scale);
+    int w = (int)(480 * g_scale);
+    int ch = m + chkH + (int)(8 * g_scale) + lblH + editH + (int)(10 * g_scale) + tipH
+           + (int)(14 * g_scale) + btnH + m;
+    RECT rcFrame = { 0, 0, w, ch };
+    AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    int ww = rcFrame.right - rcFrame.left, wh = rcFrame.bottom - rcFrame.top;
+    RECT pr; GetWindowRect(parent, &pr);
+    int x = pr.left + ((pr.right - pr.left) - ww) / 2, y = pr.top + ((pr.bottom - pr.top) - wh) / 2;
+    if (x < 0) x = 0; if (y < 0) y = 0;
+    ProxyState st;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", L"代理配置（仅对 github.com 生效，内网 Gitea 恒为直连）",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, parent, nullptr, g_hInst, nullptr);
+    st.hChk = CreateWindowExW(0, L"BUTTON", L"启用代理", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        m, m, w - 2 * m, chkH, dlg, (HMENU)200, g_hInst, nullptr);
+    HWND hLbl = CreateWindowExW(0, L"STATIC", L"代理地址（如 http://127.0.0.1:7890）:", WS_CHILD | WS_VISIBLE,
+        m, m + chkH + (int)(8 * g_scale), w - 2 * m, lblH, dlg, nullptr, g_hInst, nullptr);
+    st.hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", addr.c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, m, m + chkH + (int)(8 * g_scale) + lblH, w - 2 * m, editH,
+        dlg, (HMENU)101, g_hInst, nullptr);
+    st.hDetect = CreateWindowExW(0, L"STATIC",
+        (detected.empty() ? L"检测结果：未检测到系统代理/环境变量，可手动填写" : L"检测结果：系统代理 " + detected).c_str(),
+        WS_CHILD | WS_VISIBLE, m, m + chkH + (int)(8 * g_scale) + lblH + editH + (int)(10 * g_scale), w - 2 * m, tipH,
+        dlg, nullptr, g_hInst, nullptr);
+    HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        w - 2 * (int)(80 * g_scale) - m, ch - m - btnH, (int)(80 * g_scale), btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
+    HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        w - (int)(80 * g_scale) - m, ch - m - btnH, (int)(80 * g_scale), btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
+    for (HWND c : { st.hChk, hLbl, st.hEdit, st.hDetect, hOk, hCancel })
+        SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    SendMessageW(st.hChk, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(st.hEdit, on);
+    SetWindowSubclass(dlg, ProxyDlgSub, 1, (DWORD_PTR)&st);
+    EnableWindow(parent, FALSE);
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(on ? st.hEdit : st.hChk);
+    MSG msg;
+    while (!st.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (IsDialogMessageW(dlg, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    EnableWindow(parent, TRUE);
+    SetActiveWindow(parent);
+    return st.result;
+}
+// 代理配置：仅对 github.com 生效（内网 Gitea 的直连覆盖不受影响）
+// 自动识别：预填依次取 当前 git 代理 → Windows 系统代理 → http_proxy/https_proxy 环境变量
 static void OpProxyCfg() {
     std::wstring cur = Trim(GitOut({ L"config", L"--global", L"--get", L"http.https://github.com/.proxy" }));
-    auto r = AskText(g_main, L"代理配置（仅对 github.com 生效）",
-        L"github.com 代理地址（如 http://127.0.0.1:7890）:\n留空提交 = 清除代理恢复直连:", cur);
-    if (!r) return;
-    if (r->empty()) {
-        if (cur.empty()) { Info(g_main, L"当前未设置代理，无需清除。"); return; }
+    std::wstring detected = DetectProxy();
+    auto r = AskProxy(g_main, !cur.empty(), cur.empty() ? detected : cur, detected);
+    if (!r) return;                                          // 取消
+    if (r->empty()) {                                        // 关闭代理
+        if (cur.empty()) { Info(g_main, L"当前未设置代理，无需关闭。"); return; }
         OutSep(); OutCmd(L"git config --global --unset http.https://github.com/.proxy");
         Exec({ G({ L"config", L"--global", L"--unset", L"http.https://github.com/.proxy" }) });
-        OutTxt(L"已清除 github.com 代理（恢复直连）。");
-    } else {
+        OutTxt(L"已关闭 github.com 代理（恢复直连）。");
+    } else {                                                 // 启用并写入
         OutSep(); OutCmd(L"git config --global http.https://github.com/.proxy " + *r);
         ExecV({ G({ L"config", L"--global", L"http.https://github.com/.proxy", *r }),
                 G({ L"config", L"--global", L"--get", L"http.https://github.com/.proxy" }) });
-        OutTxt(L"已设置 github.com 代理，后续 推送/拉取 走该代理。");
+        OutTxt(L"已启用 github.com 代理: " + *r + L"，后续 推送/拉取 走该代理。");
     }
 }
 static void OpResetGit() {
