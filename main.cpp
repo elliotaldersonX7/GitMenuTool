@@ -748,6 +748,10 @@ struct LogSeg { std::wstring text; COLORREF color; };
 struct LogLine { std::vector<LogSeg> segs; };
 static std::vector<LogLine> g_log;
 static int g_logScroll = 0, g_logTotalH = 0;
+static int g_logMaxW = 0;       // 日志最宽行像素宽（含左右留白），横向滚动范围
+static int g_logScrollX = 0;    // 横向滚动偏移
+static std::wstring LineText(int i);                    // 前向声明：LogAppend 维护最宽行宽用
+static int LineWidthUpTo(const std::wstring& t, int n);
 static int LogLineH() {
     HDC dc = GetDC(nullptr);
     HFONT of = (HFONT)SelectObject(dc, g_fontMono);
@@ -762,6 +766,8 @@ static void UpdateOutScroll(HWND h) {
     RECT rc; GetClientRect(h, &rc);
     SCROLLINFO si = { sizeof(si), SIF_RANGE | SIF_PAGE, 0, g_logTotalH, (UINT)rc.bottom, 0 };
     SetScrollInfo(h, SB_VERT, &si, TRUE);
+    SCROLLINFO sh = { sizeof(sh), SIF_RANGE | SIF_PAGE, 0, g_logMaxW, (UINT)rc.right, 0 };
+    SetScrollInfo(h, SB_HORZ, &sh, TRUE);   // 横向：最宽行超出客户区时可拖动
 }
 static void OutScrollTo(HWND h, int pos) {
     RECT rc; GetClientRect(h, &rc);
@@ -775,6 +781,19 @@ static void OutScrollTo(HWND h, int pos) {
         InvalidateRect(h, nullptr, FALSE);
     }
 }
+// 横向滚动到指定像素（范围 0 ~ 最宽行-客户区宽）
+static void OutScrollXTo(HWND h, int pos) {
+    RECT rc; GetClientRect(h, &rc);
+    int maxScroll = g_logMaxW - (rc.right - rc.left);
+    if (maxScroll < 0) maxScroll = 0;
+    if (pos < 0) pos = 0;
+    if (pos > maxScroll) pos = maxScroll;
+    if (pos != g_logScrollX) {
+        g_logScrollX = pos;
+        SetScrollPos(h, SB_HORZ, pos, TRUE);
+        InvalidateRect(h, nullptr, FALSE);
+    }
+}
 static void LogAppend(const std::vector<Seg>& segs) {
     LogLine ln;
     for (auto& s : segs) ln.segs.push_back({ s.text, s.color });
@@ -785,6 +804,11 @@ static void LogAppend(const std::vector<Seg>& segs) {
         follow = (g_logScroll + (rc.bottom - rc.top)) >= g_logTotalH - LogLineH();
     }
     g_log.push_back(std::move(ln));
+    {
+        std::wstring lt = LineText((int)g_log.size() - 1);   // 维护最宽行宽（横向滚动范围）
+        int lw = 2 * (int)(6 * g_scale) + LineWidthUpTo(lt, (int)lt.size());
+        if (lw > g_logMaxW) g_logMaxW = lw;
+    }
     if (g_out) {
         UpdateOutScroll(g_out);
         RECT rc; GetClientRect(g_out, &rc);
@@ -878,7 +902,7 @@ static void OutHitTest(POINT pt, int& line, int& ch) {
     if (line < 0) line = 0;
     if (line >= (int)g_log.size()) line = (int)g_log.size() - 1;
     std::wstring lt = LineText(line);
-    int x = pt.x - pad; if (x < 0) x = 0;
+    int x = pt.x - pad + g_logScrollX; if (x < 0) x = 0;   // 命中换算含横向偏移
     int cw = CharW(), acc = 0, i = 0;
     for (; i < (int)lt.size(); ++i) {
         int wch = IsWideChar(lt[i]) ? cw * 2 : cw;
@@ -910,7 +934,7 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int sl0, sc0, sl1, sc1;
         bool hasSel = SelRange(sl0, sc0, sl1, sc1);
         for (int i = first; i < (int)g_log.size() && y < rc.bottom; ++i, y += lh) {
-            int x = pad;
+            int x = pad - g_logScrollX;   // 横向滚动偏移
             for (auto& s : g_log[i].segs) {
                 if (s.text.empty()) continue;
                 SetTextColor(mem, s.color);
@@ -925,7 +949,8 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 int a = (i == sl0) ? sc0 : 0;
                 int b = (i == sl1) ? sc1 : (int)lt.size();
                 if (b > a) {
-                    RECT hl = { pad + LineWidthUpTo(lt, a), y, pad + LineWidthUpTo(lt, b), y + lh };
+                    RECT hl = { pad + LineWidthUpTo(lt, a) - g_logScrollX, y,
+                                pad + LineWidthUpTo(lt, b) - g_logScrollX, y + lh };
                     HBRUSH hb = CreateSolidBrush(RGB(38, 79, 120));
                     FillRect(mem, &hl, hb);
                     DeleteObject(hb);
@@ -936,7 +961,7 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
                         int en = idx + slen < b ? idx + slen : b;
                         if (en > st) {
                             SetTextColor(mem, s.color);
-                            TextOutW(mem, pad + LineWidthUpTo(lt, st), y, s.text.c_str() + (st - idx), en - st);
+                            TextOutW(mem, pad + LineWidthUpTo(lt, st) - g_logScrollX, y, s.text.c_str() + (st - idx), en - st);
                         }
                         idx += slen;
                     }
@@ -967,6 +992,29 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
         }
         OutScrollTo(h, pos);
+        return 0;
+    }
+    case WM_HSCROLL: {   // 横向拖动条：长行左右拖动查看
+        int pos = g_logScrollX;
+        switch (LOWORD(w)) {
+            case SB_LEFT: pos = 0; break;
+            case SB_RIGHT: pos = g_logMaxW; break;
+            case SB_LINELEFT: pos -= CharW() * 3; break;
+            case SB_LINERIGHT: pos += CharW() * 3; break;
+            case SB_PAGELEFT: pos -= (int)(120 * g_scale); break;
+            case SB_PAGERIGHT: pos += (int)(120 * g_scale); break;
+            case SB_THUMBTRACK: {
+                SCROLLINFO ti = { sizeof(ti), SIF_TRACKPOS, 0, 0, 0, 0 };
+                pos = GetScrollInfo(h, SB_HORZ, &ti) ? ti.nTrackPos : HIWORD(w);
+                break;
+            }
+        }
+        OutScrollXTo(h, pos);
+        return 0;
+    }
+    case WM_SIZE: {
+        UpdateOutScroll(h);   // 客户区变化时同步两条滚动条范围
+        InvalidateRect(h, nullptr, FALSE);
         return 0;
     }
     case WM_MOUSEWHEEL: {
@@ -1648,13 +1696,15 @@ static void ShowAboutDialog(const UpdateResult* pre) {
     HWND hVer = CreateWindowExW(0, L"STATIC",
         (L"当前版本：" + CurAppVersion() + L"\n作者：" + APP_AUTHOR).c_str(), ctr,
         s.m, s.m + (int)(24 * g_scale), s.w - 2 * s.m, (int)(36 * g_scale), dlg, (HMENU)IDC_ABOUT_VER, g_hInst, nullptr);
-    HWND hLink = CreateWindowExW(0, L"STATIC", linkText.c_str(), ctr,
+    HWND hLink = CreateWindowExW(0, L"EDIT", linkText.c_str(),
+        WS_CHILD | WS_VISIBLE | ES_READONLY | ES_CENTER,   // 只读编辑框：可点选/Ctrl+C 复制
         s.m, s.linkY, s.w - 2 * s.m, s.linkH, dlg, (HMENU)IDC_ABOUT_LINK, g_hInst, nullptr);
     HWND hCheck = CreateWindowExW(0, L"BUTTON", L"检查更新", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         (s.w - s.bw) / 2, s.y1, s.bw, s.btnH, dlg, (HMENU)IDC_ABOUT_CHECK, g_hInst, nullptr);
     SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_fontUIBig, TRUE);   // 工具名大 3 号
     SendMessageW(hVer, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
     SendMessageW(hLink, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
+    SendMessageW(hLink, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);   // 去编辑框内边距，与原静态对齐
     SendMessageW(hCheck, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
     SetWindowSubclass(dlg, AboutDlgSub, 1, (DWORD_PTR)&s);
     EnableWindow(g_main, FALSE);
@@ -3069,7 +3119,7 @@ static void BuildControls() {
     MkBtn(g_main, L"清空Git重来", IDC_RESET, 0, 0, 0, 0, g_fontUI);
     // 状态卡（RichEdit）+ 输出区（自绘黑底日志）
     g_stat = NewRich(g_main, (HMENU)IDC_STAT, RGB(0xff, 0xff, 0xff));
-    g_out  = CreateWindowExW(0, L"GIT_OUT", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+    g_out  = CreateWindowExW(0, L"GIT_OUT", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL,
                              0, 0, 0, 0, g_main, (HMENU)IDC_OUT, g_hInst, nullptr);
     // 命令输入行
     g_cmdEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
@@ -3203,7 +3253,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         (void)code;
         if (id == IDC_PICKDIR) { PickDir(); return 0; }
         if (id == IDC_CLEAROUT) {
-            g_log.clear(); g_logScroll = 0; g_anchorL = g_selCurL = -1; UpdateOutScroll(g_out); InvalidateRect(g_out, nullptr, FALSE);
+            g_log.clear(); g_logScroll = 0; g_logMaxW = 0; g_logScrollX = 0; g_anchorL = g_selCurL = -1; UpdateOutScroll(g_out); InvalidateRect(g_out, nullptr, FALSE);
             OutTxt(L"提示：输出区可拖选文字，Ctrl+C 复制选中（未选中=全部），Ctrl+A 全选，Ctrl+V 贴到命令输入行。");
             return 0;
         }
