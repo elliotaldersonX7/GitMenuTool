@@ -2386,16 +2386,50 @@ static void OpInitRepo() {
 struct RemoteRow {
     std::wstring name, url;
     bool existing = false, checked = true;
+    int cid = -1;                                 // 新增行的创建序号（删除/重编辑按钮定位用）
     HWND hChk = nullptr, hName = nullptr, hUrl = nullptr;
+    HWND hDel = nullptr, hRe = nullptr;           // 新增行专有：删除/重编辑按钮
 };
 struct RemoteCfgState {
     std::vector<RemoteRow> rows;
     HWND hDlg = nullptr, hAdd = nullptr, hOk = nullptr, hCancel = nullptr;
     std::wstring defaultPick;             // OK 时勾选的那个远端 = 默认远端（只能勾一个）
-    int addY = 0, ch = 0;
+    int addY = 0, ch = 0, nextIdx = 0;
     bool done = false;
 };
 static const int REMOTE_UI_MAX = 10;   // 弹窗界面软上限（git 支持任意多个，超了用底部命令行）
+// 行/按钮/弹窗高度统一重排（增删行后调用）
+static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
+    int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
+    int gap = (int)(6 * g_scale), hintH = (int)(18 * g_scale), addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
+    int wd = (int)(520 * g_scale), nameW = (int)(150 * g_scale);
+    int yy = mg + hintH + (int)(4 * g_scale);
+    for (auto& r : st->rows) {
+        if (r.existing) {
+            if (r.hChk) MoveWindow(r.hChk, mg, yy, wd - 2 * mg, rowChkH, TRUE);
+            yy += rowChkH + gap;
+        } else {
+            if (r.hChk) MoveWindow(r.hChk, mg, yy, (int)(22 * g_scale), rowEditH, TRUE);
+            if (r.hName) MoveWindow(r.hName, mg + (int)(26 * g_scale), yy, nameW, rowEditH, TRUE);
+            if (r.hUrl) MoveWindow(r.hUrl, mg + (int)(26 * g_scale) + nameW + (int)(6 * g_scale), yy,
+                wd - 2 * mg - (int)(26 * g_scale) - nameW - (int)(6 * g_scale) - (int)(118 * g_scale), rowEditH, TRUE);
+            if (r.hDel) MoveWindow(r.hDel, mg + wd - 2 * mg - (int)(112 * g_scale), yy, (int)(54 * g_scale), rowEditH, TRUE);
+            if (r.hRe) MoveWindow(r.hRe, mg + wd - 2 * mg - (int)(55 * g_scale), yy, (int)(54 * g_scale), rowEditH, TRUE);
+            yy += rowEditH + gap;
+        }
+    }
+    st->addY = yy;
+    if (st->hAdd) MoveWindow(st->hAdd, mg, st->addY, (int)(110 * g_scale), addH, TRUE);
+    int by = st->addY + addH + (int)(12 * g_scale);
+    if (st->hOk) MoveWindow(st->hOk, wd - 2 * (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, TRUE);
+    if (st->hCancel) MoveWindow(st->hCancel, wd - (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, TRUE);
+    int oldCh = st->ch;
+    st->ch = st->addY + addH + (int)(12 * g_scale) + btnH + mg;
+    RECT fr; GetWindowRect(h, &fr);
+    SetWindowPos(h, nullptr, 0, 0, fr.right - fr.left, fr.bottom - fr.top + (st->ch - oldCh),
+                 SWP_NOMOVE | SWP_NOZORDER);
+    InvalidateRect(h, nullptr, FALSE);
+}
 static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
     RemoteCfgState* st = (RemoteCfgState*)data;
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
@@ -2404,35 +2438,61 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
     switch (msg) {
     case WM_COMMAND: {
         int id = LOWORD(w), code = HIWORD(w);
-        if (id == 290 && code == BN_CLICKED) {           // ＋添加远端：动态追加一行并加高弹窗
+        if (id == 290 && code == BN_CLICKED) {           // ＋添加远端：追加一行（默认不勾选=暂不加入），弹窗加高
             if ((int)st->rows.size() >= REMOTE_UI_MAX) {
                 Warn(h, Fmt(L"界面最多管理 %d 个远端（git 本身无限制，更多可用底部命令行）。", REMOTE_UI_MAX));
                 return 0;
             }
-            int n = (int)st->rows.size();
+            int n = st->nextIdx++;
             RemoteRow r;
+            r.cid = n;
+            r.checked = false;                           // 默认不勾选：勾选=确认加入
             r.hChk = CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                mg, st->addY, (int)(22 * g_scale), rowEditH, h, (HMENU)(INT_PTR)(400 + n), g_hInst, nullptr);
-            SendMessageW(r.hChk, BM_SETCHECK, BST_CHECKED, 0);
+                mg, st->addY, (int)(22 * g_scale), rowEditH, h, (HMENU)(INT_PTR)(1000 + n), g_hInst, nullptr);
             r.hName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                mg + (int)(26 * g_scale), st->addY, nameW, rowEditH, h, (HMENU)(INT_PTR)(500 + n), g_hInst, nullptr);
+                mg + (int)(26 * g_scale), st->addY, nameW, rowEditH, h, (HMENU)(INT_PTR)(1100 + n), g_hInst, nullptr);
             r.hUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 mg + (int)(26 * g_scale) + nameW + (int)(6 * g_scale), st->addY,
-                wd - 2 * mg - (int)(26 * g_scale) - nameW - (int)(6 * g_scale), rowEditH, h, (HMENU)(INT_PTR)(600 + n), g_hInst, nullptr);
+                wd - 2 * mg - (int)(26 * g_scale) - nameW - (int)(6 * g_scale) - (int)(118 * g_scale), rowEditH, h,
+                (HMENU)(INT_PTR)(1200 + n), g_hInst, nullptr);
+            r.hDel = CreateWindowExW(0, L"BUTTON", L"删除", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                mg + wd - 2 * mg - (int)(112 * g_scale), st->addY, (int)(54 * g_scale), rowEditH, h,
+                (HMENU)(INT_PTR)(1300 + n), g_hInst, nullptr);
+            r.hRe = CreateWindowExW(0, L"BUTTON", L"重编辑", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                mg + wd - 2 * mg - (int)(55 * g_scale), st->addY, (int)(54 * g_scale), rowEditH, h,
+                (HMENU)(INT_PTR)(1400 + n), g_hInst, nullptr);
             SendMessageW(r.hChk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
             SendMessageW(r.hName, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
             SendMessageW(r.hUrl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+            SendMessageW(r.hDel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+            SendMessageW(r.hRe, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
             st->rows.push_back(std::move(r));
-            st->ch += rowEditH + gap;
-            st->addY += rowEditH + gap;
-            RECT fr; GetWindowRect(h, &fr);
-            SetWindowPos(h, nullptr, 0, 0, fr.right - fr.left, fr.bottom - fr.top + rowEditH + gap,
-                         SWP_NOMOVE | SWP_NOZORDER);
-            MoveWindow(st->hAdd, mg, st->addY, (int)(110 * g_scale), addH, TRUE);
-            int by = st->addY + addH + (int)(12 * g_scale);
-            MoveWindow(st->hOk, wd - 2 * (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, TRUE);
-            MoveWindow(st->hCancel, wd - (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, TRUE);
-            InvalidateRect(h, nullptr, FALSE);
+            RemoteRowsRelayout(h, st);
+            return 0;
+        }
+        if (id >= 1300 && id < 1300 + (int)st->rows.size() + 20 && code == BN_CLICKED) {   // 删除该行（新增行专用）
+            int cid = id - 1300;
+            for (auto it = st->rows.begin(); it != st->rows.end(); ++it) {
+                if (!it->existing && it->cid == cid) {
+                    for (HWND hc : { it->hChk, it->hName, it->hUrl, it->hDel, it->hRe })
+                        if (hc) DestroyWindow(hc);
+                    st->rows.erase(it);
+                    RemoteRowsRelayout(h, st);
+                    return 0;
+                }
+            }
+            return 0;
+        }
+        if (id >= 1400 && id < 1400 + (int)st->rows.size() + 20 && code == BN_CLICKED) {   // 重编辑：清空该行重新填写
+            int cid = id - 1400;
+            for (auto& r : st->rows) {
+                if (!r.existing && r.cid == cid && r.hName) {
+                    SetWindowTextW(r.hName, L"");
+                    SetWindowTextW(r.hUrl, L"");
+                    SetFocus(r.hName);
+                    return 0;
+                }
+            }
             return 0;
         }
         if (id == IDOK || id == IDCANCEL) {
@@ -2487,7 +2547,7 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
         std::wstring nm = Trim(l);
         if (nm.empty()) continue;
         std::wstring url = Trim(GitOut({ L"config", L"--get", L"remote." + nm + L".url" }));
-        st.rows.push_back({ nm, url, true, true, nullptr, nullptr, nullptr });
+        st.rows.push_back({ nm, url, true, true, -1, nullptr, nullptr, nullptr, nullptr, nullptr });
     }
     int nExist = (int)st.rows.size();
     st.addY = mg + hintH + (int)(4 * g_scale) + nExist * (rowChkH + gap);
