@@ -540,8 +540,8 @@ static std::vector<std::wstring> G(std::initializer_list<std::wstring> args) {
     for (auto& a : args) argv.push_back(a);
     return argv;
 }
-// 默认远端：优先当前分支上游远端；否则第一个远端；无返回空
-static std::wstring DetectRemote() {
+// 默认远端：优先当前分支上游远端（upstreamKnown 非空时直接用，省一次子进程）；否则第一个远端；无返回空
+static std::wstring DetectRemote(const std::wstring& upstreamKnown = L"") {
     if (g_repo.empty()) return L"";
     std::vector<std::wstring> rems;
     for (auto& l : SplitLines(GitOut({ L"remote" }))) {
@@ -549,7 +549,8 @@ static std::wstring DetectRemote() {
         if (!t.empty()) rems.push_back(t);
     }
     if (rems.empty()) return L"";
-    std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
+    std::wstring up = !upstreamKnown.empty() ? upstreamKnown
+                      : Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     if (!up.empty()) {
         size_t i = up.find(L'/');
         if (i != std::wstring::npos) {
@@ -2045,10 +2046,43 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
         g_flowBlock = -1;
         return lines;
     }
-    // ① 全局配置：user.name 与 user.email 均非空才算完成
-    bool s0 = !Trim(GitOut({ L"config", L"--global", L"user.name" })).empty()
-           && !Trim(GitOut({ L"config", L"--global", L"user.email" })).empty();
-    bool inRepo = Trim(GitOut({ L"rev-parse", L"--is-inside-work-tree" })) == L"true";
+    // ① 全局配置：一次 --list 解析 user.name/email（原先两次子进程）
+    bool hasName = false, hasMail = false;
+    for (auto& l : SplitLines(GitOut({ L"config", L"--global", L"--list" }))) {
+        if (l.rfind(L"user.name=", 0) == 0 && !Trim(l.substr(10)).empty()) hasName = true;
+        if (l.rfind(L"user.email=", 0) == 0 && !Trim(l.substr(11)).empty()) hasMail = true;
+    }
+    bool s0 = hasName && hasMail;
+    // ②④⑤ 合并探测：一次 status -b --porcelain 拿 在仓库/分支/上游/领先落后/未提交/有无提交
+    std::wstring st = GitOut({ L"status", L"-b", L"--porcelain" });
+    bool inRepo = !st.empty();   // 非仓库目录 status 报错返回空；仓库内必有 ## 头
+    std::vector<std::wstring> sl = SplitLines(st);
+    std::wstring head = sl.empty() ? std::wstring() : sl[0];
+    bool noCommit = head.find(L"No commits yet") != std::wstring::npos;
+    std::wstring branch = L"（空）", upstream;
+    int ahead = 0, behind = 0;
+    if (head.rfind(L"## ", 0) == 0) {
+        std::wstring info = head.substr(3);
+        if (noCommit) {                                  // "## No commits yet on main"
+            size_t p = info.find(L"on ");
+            if (p != std::wstring::npos) branch = Trim(info.substr(p + 3));
+        } else {                                         // "## main...QKIE/main [ahead 2, behind 0]"
+            size_t dots = info.find(L"...");
+            size_t cut = dots == std::wstring::npos ? info.size() : dots;
+            branch = Trim(info.substr(0, cut));
+            if (dots != std::wstring::npos) {
+                std::wstring rest = info.substr(dots + 3);
+                size_t b2 = rest.find(L" [");
+                upstream = (b2 == std::wstring::npos) ? Trim(rest) : Trim(rest.substr(0, b2));
+                if (b2 != std::wstring::npos) {
+                    std::wstring ab = rest.substr(b2 + 2);
+                    size_t pa = ab.find(L"ahead "), pb = ab.find(L"behind ");
+                    if (pa != std::wstring::npos) ahead = _wtoi(ab.c_str() + pa + 6);
+                    if (pb != std::wstring::npos) behind = _wtoi(ab.c_str() + pb + 7);
+                }
+            }
+        }
+    }
     // 流程行四环节：①全局配置 ②初始化仓库 ③配置ignore ④远端+首推（可选，不强制）
     struct PillS { const wchar_t* name; bool ok; bool optional; };
     if (!s0 || !inRepo) {
@@ -2068,16 +2102,13 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
         else     lines->push_back({ SegT(L"（该目录还不是 git 仓库，请点顶栏【✚ 初始化仓库】）", STAT_DIM) });
         return lines;
     }
-    g_remote = DetectRemote();
-    std::wstring branch = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"HEAD" }));
-    if (branch.empty()) branch = L"（空）";
-    // ③④⑤ 环节状态
+    g_remote = DetectRemote(upstream);
+    // ③④⑤ 环节状态（分支/上游/有无提交 已由 status 合并探测得出）
     bool s2 = false, s3 = false, s4 = false;
     std::error_code ec;
     fs::path gi = fs::path(g_repo) / L".gitignore";
     s2 = fs::exists(gi, ec) && fs::file_size(gi, ec) > 0;
-    s4 = !Trim(GitOut({ L"rev-parse", L"-q", L"--verify", L"HEAD" })).empty();   // ④ 首次提交：仓库里已有提交即完成
-    std::wstring upstream = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
+    s4 = !noCommit;   // ④ 首次提交：status 头无 "No commits yet" 即已有提交
     s3 = !g_remote.empty() && !upstream.empty();
     g_flowBlock = !s2 ? 2 : -1;   // ③未完成锁左栏；④首次提交在③完成后自动执行；⑤远端+首推为可选，不配置也解锁
     // 流程行
@@ -2095,10 +2126,14 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     lines->push_back(flow);
     // 分支行
     lines->push_back({ SegT(L"分支：", STAT_TXT, true), SegT(L" " + branch + L" ", STAT_BLU, true, BG_BLU) });
-    // ① 工作区（有无未提交改动）
-    std::wstring st = GitOut({ L"status", L"--porcelain" });
+    // 工作区行（有无未提交改动）：复用合并探测的 status 结果（首行 ## 头，其后为改动条目）
     int nTotal = 0, nUntracked = 0;
-    for (auto& l : SplitLines(st)) if (!Trim(l).empty()) { ++nTotal; if (l.rfind(L"??", 0) == 0) ++nUntracked; }
+    for (size_t i2 = 1; i2 < sl.size(); ++i2) {
+        const std::wstring& l = sl[i2];
+        if (l.empty()) continue;
+        ++nTotal;
+        if (l.rfind(L"??", 0) == 0) ++nUntracked;
+    }
     if (nTotal > 0) {
         std::wstring dtxt = L"未提交改动 " + std::to_wstring(nTotal) + L" 处";
         if (nUntracked) dtxt += L"（含未跟踪 " + std::to_wstring(nUntracked) + L"）";
@@ -2106,13 +2141,9 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     } else {
         lines->push_back({ SegT(L"工作区：", STAT_TXT, true), SegT(L" ✔ 干净（无未提交改动） ", STAT_GRN, false, BG_GRN) });
     }
-    // ② 已提交（本地 vs 远端，谁领先谁显示 ↑+数量）
+    // ② 已提交（本地 vs 远端）：领先/落后取自 status 头的 [ahead/behind]，不再单独跑 rev-list
     std::vector<Seg> cm = { SegT(L"已提交：", STAT_TXT, true) };
-    std::wstring ab = GitOut({ L"rev-list", L"--left-right", L"--count", L"HEAD...@{u}" });
-    size_t tab = ab.find(L'\t');
-    if (tab != std::wstring::npos) {
-        int ahead = _wtoi(Trim(ab.substr(0, tab)).c_str());
-        int behind = _wtoi(Trim(ab.substr(tab + 1)).c_str());
+    if (!upstream.empty()) {
         cm.push_back(SegT(L" 本地 ", STAT_TXT));
         cm.push_back(ahead > 0 ? SegT(L" ↑" + std::to_wstring(ahead) + L" ", STAT_BLU, true, BG_BLU)
                                : SegT(L" 0 ", STAT_DIM));
