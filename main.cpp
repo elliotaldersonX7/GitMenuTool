@@ -173,7 +173,6 @@ static WNDPROC g_dirEditProc = nullptr, g_cmdEditProc = nullptr;
 static double g_scale = 1.0;
 
 static std::wstring g_git, g_repo, g_remote, g_statUrl;
-static std::wstring g_repoTag;            // 工具仓库 HEAD 精确标签（仅开发机有值；无则版本识别走标记/内置）
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
 static int g_flowBlock = -1;              // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；-1=流程完成。④远端+首推为可选环节，不产生卡点）
@@ -345,16 +344,6 @@ static std::wstring GitOut(const std::vector<std::wstring>& args, DWORD timeoutM
     for (auto& a : args) argv.push_back(a);
     GitResult r = RunGit(argv, L"", timeoutMs);
     return r.rc == 0 ? r.out : L"";
-}
-// 工具自身代码仓库的 HEAD 精确标签（exe 所在目录即工具代码仓库）；无精确标签返回空，
-// 版本识别交由升级标记/内置版本兜底（非精确 describe 串带 -N-g 后缀，参与比较反而会误判）
-static std::wstring GetToolRepoTag() {
-    wchar_t exePath[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    std::vector<std::wstring> cmd = { g_git, L"-C", fs::path(exePath).parent_path().wstring(),
-                                      L"describe", L"--tags", L"--exact-match" };
-    GitResult r = RunGit(cmd, L"", 10000);
-    return Trim(r.rc == 0 ? r.out : L"");
 }
 // ============================ 检查更新（GitHub Release）======================
 // WinINet 同步 GET（只在后台线程调用）；proxy=true 走系统代理，false 直连；失败返回空串
@@ -1366,12 +1355,9 @@ struct UpdateResult {
 static HWND g_hAboutDlg = nullptr;          // 关于弹窗（开着时检查结果写回弹窗）
 static std::atomic<bool> g_updateRunning{ false };
 static bool g_updateNagged = false;         // 自动检测的新版提示每会话只弹一次
-// 当前显示的版本：HEAD 精确仓库标签（开发机）> 构建时注入的 APP_VERSION（对外用户）
-// APP_VERSION 由 build.bat 从 git describe 注入、随 exe 换身自动更新，无需外部状态
-static std::wstring CurAppVersion() {
-    if (!g_repoTag.empty()) return g_repoTag;
-    return std::wstring(APP_VERSION);
-}
+// 当前显示的版本：即构建时注入的最新 tag（build.bat 从 git describe 剥离 -N-ghash 后缀生成）
+// 对外用户随资产携带；开发机未打 tag 时为最近一个 tag（未发布=不提示升级），单一来源无运行时 git 查询
+static std::wstring CurAppVersion() { return std::wstring(APP_VERSION); }
 /**
   ******************************************************************************
   * @brief    后台线程检查 GitHub 最新 Release（releases/latest）
@@ -3450,7 +3436,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     LoadLibraryW(L"Riched20.dll");   // RichEdit 控件库（RICHEDIT_CLASS）
     g_git = FindExe(L"git");
     if (g_git.empty()) { MessageBoxW(nullptr, L"未检测到 Git，请先安装 Git for Windows。", APP_TITLE, MB_ICONERROR); return 1; }
-    g_repoTag = GetToolRepoTag();   // 工具仓库 HEAD 精确标签（无则空，版本识别走标记/APP_VERSION）
     g_scale = GetDeviceCaps(GetDC(nullptr), LOGPIXELSX) / 96.0;
     g_fontUI = MkFont(10, false, L"Microsoft YaHei UI");
     g_fontUIBold = MkFont(10, true, L"Microsoft YaHei UI");
