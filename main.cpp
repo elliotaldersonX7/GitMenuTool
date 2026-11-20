@@ -3560,11 +3560,17 @@ static void Layout() {
 }
 // 状态卡渲染
 static void RenderStatus(std::vector<std::vector<Seg>>* lines) {
-    SetWindowTextW(g_stat, L"");
     g_statLineCnt = (int)lines->size();
+    int needH = g_statLineCnt * (int)(22 * g_scale) + (int)(16 * g_scale);
+    RECT crc; GetClientRect(g_stat, &crc);
+    bool resize = crc.bottom != needH;
+    SendMessageW(g_stat, WM_SETREDRAW, FALSE, 0);   // 关重绘：清空+逐行追加过程不闪
+    SetWindowTextW(g_stat, L"");
     for (auto& ln : *lines) RichAppendLine(g_stat, ln);
+    SendMessageW(g_stat, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_stat, nullptr, FALSE);
     delete lines;
-    Layout();   // 行数变化 → 状态卡高度自适应
+    if (resize) Layout();   // 行数变化才重排布局，避免每次刷新整列抖动
 }
 
 // ============================ 主窗口过程 ====================================
