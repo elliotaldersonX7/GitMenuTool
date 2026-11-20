@@ -2391,8 +2391,7 @@ struct RemoteRow {
 struct RemoteCfgState {
     std::vector<RemoteRow> rows;
     HWND hDlg = nullptr, hAdd = nullptr, hOk = nullptr, hCancel = nullptr;
-    HWND hCombo = nullptr;                // 默认远端下拉框（推送/拉取使用的）
-    std::wstring defaultPick;             // OK 时选中的默认远端（空=未改动）
+    std::wstring defaultPick;             // OK 时勾选的那个远端 = 默认远端（只能勾一个）
     int addY = 0, ch = 0;
     bool done = false;
 };
@@ -2438,9 +2437,8 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
         }
         if (id == IDOK || id == IDCANCEL) {
             if (id == IDOK) {
-                int sel = (int)SendMessageW(st->hCombo, CB_GETCURSEL, 0, 0);
-                if (sel >= 0 && sel < (int)st->rows.size() && st->rows[sel].existing)
-                    st->defaultPick = st->rows[sel].name;   // 选中的默认远端（仅限现有远端）
+                // 读取勾选与新行内容；勾选的现有远端 = 默认远端（只能一个），去勾选 = OK 时删除
+                int existChecked = 0;
                 for (auto& r : st->rows) {
                     if (r.hChk) r.checked = SendMessageW(r.hChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
                     auto readEdit = [&](HWND he, std::wstring& out) {
@@ -2452,18 +2450,16 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                     };
                     readEdit(r.hName, r.name);
                     readEdit(r.hUrl, r.url);
+                    if (r.existing && r.checked) { ++existChecked; st->defaultPick = r.name; }
                 }
-                // 校验：勾选的新行必须 本地名+链接 都填，且名字不与现有/其它新行重名
-                std::vector<std::wstring> names;
-                for (auto& r : st->rows) if (r.existing) names.push_back(r.name);
+                if (existChecked == 0) { Warn(h, L"至少保留一个远端：请勾选一个作为默认远端（去勾选 = 删除该远端）。"); return 0; }
+                if (existChecked > 1) { Warn(h, L"默认远端只能勾选一个（其余请去勾选删除）。"); return 0; }
+                // 校验：勾选的新行必须 本地名+链接 都填，且名字不与保留的默认远端重名
                 bool bad = false;
                 for (auto& r : st->rows) {
                     if (!r.existing && r.checked) {
                         if (r.name.empty() || r.url.empty()) { Warn(h, L"新增远端需要填写 本地名 和 链接（或取消勾选该行）。"); bad = true; break; }
-                        if (std::find(names.begin(), names.end(), r.name) != names.end()) {
-                            Warn(h, Fmt(L"本地名 [%s] 与现有远端重名，请换一个。", r.name.c_str())); bad = true; break;
-                        }
-                        names.push_back(r.name);
+                        if (r.name == st->defaultPick) { Warn(h, Fmt(L"本地名 [%s] 与保留的默认远端重名，请换一个。", r.name.c_str())); bad = true; break; }
                     }
                 }
                 if (bad) return 0;   // 校验不过：弹窗保持打开
@@ -2480,10 +2476,10 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
     }
     return DefSubclassProc(h, msg, w, l);
 }
-// 配置远程弹窗：默认远端下拉框 + 现有远端勾选行 + ＋添加远端动态行；返回 rows 供调用方统一生成命令
+// 配置远程弹窗：勾选行=默认远端(只能一个)+保留，去勾选=删除；【＋添加远端】动态行；返回 rows 供调用方统一生成命令
 static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPick) {
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), gap = (int)(6 * g_scale);
-    int lblH2 = (int)(20 * g_scale), comboShowH = (int)(24 * g_scale);
+    int hintH = (int)(18 * g_scale);
     int addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
     int w = (int)(520 * g_scale);
     RemoteCfgState st;
@@ -2494,7 +2490,7 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
         st.rows.push_back({ nm, url, true, true, nullptr, nullptr, nullptr });
     }
     int nExist = (int)st.rows.size();
-    st.addY = mg + lblH2 + comboShowH + gap + nExist * (rowChkH + gap);
+    st.addY = mg + hintH + (int)(4 * g_scale) + nExist * (rowChkH + gap);
     st.ch = st.addY + addH + (int)(12 * g_scale) + btnH + mg;
     RECT rcFrame = { 0, 0, w, st.ch };
     AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
@@ -2506,27 +2502,25 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
         WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, parent, nullptr, g_hInst, nullptr);
     st.hDlg = dlg;
     SetWindowSubclass(dlg, RemoteCfgDlgSub, 1, (DWORD_PTR)&st);
-    // 默认远端下拉框（当前默认预选）
-    HWND hLbl2 = CreateWindowExW(0, L"STATIC", L"默认远端（推送/拉取使用的）:", WS_CHILD | WS_VISIBLE,
-        mg, mg, w - 2 * mg, lblH2, dlg, nullptr, g_hInst, nullptr);
-    st.hCombo = CreateWindowExW(0, L"COMBOBOX", nullptr,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
-        mg, mg + lblH2, w - 2 * mg, comboShowH + (int)(50 * g_scale), dlg, (HMENU)210, g_hInst, nullptr);
-    int sel = -1;
-    for (size_t i = 0; i < st.rows.size(); ++i) {
-        SendMessageW(st.hCombo, CB_ADDSTRING, 0, (LPARAM)st.rows[i].name.c_str());
-        if (st.rows[i].name == defaultPick) sel = (int)i;
-    }
-    SendMessageW(st.hCombo, CB_SETCURSEL, sel >= 0 ? sel : 0, 0);
-    int yy = mg + lblH2 + comboShowH + gap;
+    HWND hHint = CreateWindowExW(0, L"STATIC",
+        L"勾选一个作为默认远端（推送/拉取使用的）；去勾选 = OK 时删除该远端：", WS_CHILD | WS_VISIBLE,
+        mg, mg, w - 2 * mg, hintH, dlg, nullptr, g_hInst, nullptr);
+    SendMessageW(hHint, WM_SETFONT, (WPARAM)g_fontMenu, TRUE);
+    int yy = mg + hintH + (int)(4 * g_scale);
+    bool preMatch = false;
     for (size_t i = 0; i < st.rows.size(); ++i) {
         RemoteRow& r = st.rows[i];
         std::wstring label = r.name + L" → " + (r.url.empty() ? L"（未取到链接）" : r.url);
         r.hChk = CreateWindowExW(0, L"BUTTON", label.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             mg, yy, w - 2 * mg, rowChkH, dlg, (HMENU)(INT_PTR)(400 + (int)i), g_hInst, nullptr);
         SendMessageW(r.hChk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+        bool pre = (r.name == defaultPick);
+        if (pre) preMatch = true;
+        SendMessageW(r.hChk, BM_SETCHECK, pre ? BST_CHECKED : BST_UNCHECKED, 0);
         yy += rowChkH + gap;
     }
+    if (!preMatch && nExist > 0)   // 当前默认不在列表里（如刚改名）：兜底勾第一个
+        SendMessageW(st.rows[0].hChk, BM_SETCHECK, BST_CHECKED, 0);
     st.hAdd = CreateWindowExW(0, L"BUTTON", L"＋ 添加远端", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         mg, st.addY, (int)(110 * g_scale), addH, dlg, (HMENU)290, g_hInst, nullptr);
     int by = st.addY + addH + (int)(12 * g_scale);
@@ -2536,11 +2530,9 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
         w - (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
     for (HWND c : { st.hAdd, st.hOk, st.hCancel })
         SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
-    SendMessageW(hLbl2, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
-    SendMessageW(st.hCombo, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     EnableWindow(parent, FALSE);
     ShowWindow(dlg, SW_SHOW);
-    SetFocus(st.hCombo);
+    SetFocus(nExist ? st.rows[0].hChk : st.hAdd);
     MSG msg;
     while (!st.done && GetMessageW(&msg, nullptr, 0, 0)) {
         if (IsDialogMessageW(dlg, &msg)) continue;
@@ -2549,8 +2541,7 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
     }
     EnableWindow(parent, TRUE);
     SetActiveWindow(parent);
-    int selPost = (int)SendMessageW(st.hCombo, CB_GETCURSEL, 0, 0);
-    if (selPost >= 0 && selPost < nExist) defaultPick = st.rows[selPost].name;   // 用户改动或维持预选都回传
+    defaultPick = st.defaultPick;   // 勾选的那个远端 = 默认远端（校验已保证有且只有一个）
     return st.rows;
 }
 // 配置远程：OK 后统一生成命令——去勾选的现有远端删除，勾选的新行 remote add；默认远端变更写仓库级配置
