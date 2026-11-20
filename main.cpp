@@ -1662,10 +1662,10 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
     }
     case WM_CTLCOLORSTATIC: {
         HDC dc = (HDC)w;
-        if ((HWND)l == GetDlgItem(h, IDC_ABOUT_LINK)) {   // 链接行：蓝字（同"远端地址"）
+        if ((HWND)l == GetDlgItem(h, IDC_ABOUT_LINK)) {   // 链接行：蓝字，底色用弹窗自身画刷（避免白底）
             SetTextColor(dc, STAT_BLU);
             SetBkMode(dc, TRANSPARENT);
-            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+            return (LRESULT)GetClassLongPtrW(h, GCLP_HBRBACKGROUND);
         }
         break;
     }
