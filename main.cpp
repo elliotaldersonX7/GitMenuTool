@@ -26,6 +26,7 @@
 #include <vector>
 #include <optional>
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <chrono>
 #include <regex>
@@ -175,6 +176,7 @@ static WNDPROC g_dirEditProc = nullptr, g_cmdEditProc = nullptr;
 static double g_scale = 1.0;
 
 static std::wstring g_git, g_repo, g_remote, g_statUrl;
+static int g_statLineCnt = 0;             // 状态卡当前行数（渲染时更新，Layout 按它自适应高度）
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
 static std::atomic<int> g_flowBlock{ -1 };  // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；-1=流程完成。④远端+首推为可选环节，不产生卡点）。状态 worker 线程写、UI 线程读，用原子量
@@ -1989,52 +1991,73 @@ static std::wstring LoadLastDir() {
 }
 
 // ============================ 状态卡 ========================================
+static void RefreshStatusAsync();   // 前向声明：FetchTagDiffAsync 刷新缓存后触发重渲
 // 标签与远端的领先/落后（按 tag 名集合比较，与 commit 的 ahead/behind 同语义）
-// 状态卡每 4 秒刷新，ls-remote 走网络，故按 远端+仓库 做 30 秒缓存，避免频繁请求
+// ls-remote 走网络：异步刷新缓存（30 秒 TTL），渲染只读缓存即时完成，状态卡不因网络卡顿
 struct TagDiff { int localOnly = 0; int remoteOnly = 0; int localCnt = 0; int remoteCnt = 0; bool netOk = true; };
+static std::mutex g_tagMtx;
+static std::wstring cacheKey;
+static std::chrono::steady_clock::time_point cacheAt;
+static std::vector<std::wstring> cacheRemote;
+static bool cacheOk = false, cacheHas = false;   // cacheOk=最近一次网络是否成功；cacheHas=本 key 已拉取过（失败也记，30 秒后再试）
+static std::atomic<bool> g_tagFetching{ false };
+static std::chrono::steady_clock::time_point NowT() { return std::chrono::steady_clock::now(); }
+// 后台拉取远端标签刷新缓存；完成后触发一次状态重渲（渲染走缓存即时完成）
+static void FetchTagDiffAsync() {
+    bool expected = false;
+    if (!g_tagFetching.compare_exchange_strong(expected, true)) return;
+    std::thread([]() {
+        std::vector<std::wstring> rem;
+        bool ok = false;
+        if (!g_remote.empty()) {
+            GitResult r = RunGit({ g_git, L"-C", g_repo, L"ls-remote", L"--tags", g_remote }, L"", 15000, 10000);
+            ok = (r.rc == 0);
+            if (ok) {
+                for (auto& l : SplitLines(r.out)) {
+                    size_t tab = l.find(L'\t');
+                    if (tab == std::wstring::npos) continue;
+                    std::wstring ref = Trim(l.substr(tab + 1));
+                    const std::wstring pre = L"refs/tags/";
+                    if (ref.rfind(pre, 0) != 0) continue;
+                    std::wstring name = ref.substr(pre.size());
+                    if (name.size() >= 3 && name.compare(name.size() - 3, 3, L"^{}") == 0) continue;  // 注解标签的解引用行去重
+                    if (!name.empty()) rem.push_back(name);
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(g_tagMtx);
+            cacheRemote = std::move(rem);
+            cacheOk = ok;
+            cacheHas = true;            // 失败也记：30 秒 TTL 内不反复打网络
+            cacheKey = g_repo + L"|" + g_remote;
+            cacheAt = NowT();
+        }
+        g_tagFetching = false;
+        RefreshStatusAsync();           // 缓存已刷新：重渲一次（即时）
+    }).detach();
+}
+// 标签差异：渲染线程只读缓存（不碰网络）；缓存过期时后台补拉
 static TagDiff ComputeTagDiff() {
     TagDiff d;
     std::wstring localTags = GitOut({ L"tag", L"-l" });
     std::vector<std::wstring> ltags;
     for (auto& l : SplitLines(localTags)) { std::wstring t = Trim(l); if (!t.empty()) ltags.push_back(t); }
     d.localCnt = (int)ltags.size();
-
-    static std::wstring cacheKey;
-    static std::chrono::steady_clock::time_point cacheAt;
-    static std::vector<std::wstring> cacheRemote;
-    static bool cacheOk = false;
     std::wstring key = g_repo + L"|" + g_remote;
-    auto now = std::chrono::steady_clock::now();
-    bool fresh = cacheOk && key == cacheKey &&
-                 std::chrono::duration_cast<std::chrono::seconds>(now - cacheAt).count() < 30;
-    if (!fresh) {
-        std::wstring out;
-        if (!g_remote.empty()) {
-            GitResult r = RunGit({ g_git, L"-C", g_repo, L"ls-remote", L"--tags", g_remote }, L"", 6000, 3000);
-            cacheOk = (r.rc == 0);
-            out = cacheOk ? r.out : L"";
-        } else cacheOk = false;
-        cacheRemote.clear();
-        if (cacheOk) {
-            for (auto& l : SplitLines(out)) {
-                size_t tab = l.find(L'\t');
-                if (tab == std::wstring::npos) continue;
-                std::wstring ref = Trim(l.substr(tab + 1));
-                const std::wstring pre = L"refs/tags/";
-                if (ref.rfind(pre, 0) != 0) continue;
-                std::wstring name = ref.substr(pre.size());
-                if (name.size() >= 3 && name.compare(name.size() - 3, 3, L"^{}") == 0) continue;  // 注解标签的解引用行去重
-                if (!name.empty()) cacheRemote.push_back(name);
-            }
-        }
-        cacheKey = key; cacheAt = now;
+    bool stale = false;
+    {
+        std::lock_guard<std::mutex> lk(g_tagMtx);
+        d.netOk = cacheOk;
+        d.remoteCnt = (int)cacheRemote.size();
+        for (auto& t : ltags)
+            if (std::find(cacheRemote.begin(), cacheRemote.end(), t) == cacheRemote.end()) ++d.localOnly;
+        for (auto& t : cacheRemote)
+            if (std::find(ltags.begin(), ltags.end(), t) == ltags.end()) ++d.remoteOnly;
+        stale = !(cacheHas && key == cacheKey &&
+                  std::chrono::duration_cast<std::chrono::seconds>(NowT() - cacheAt).count() < 30);
     }
-    d.netOk = cacheOk;
-    d.remoteCnt = (int)cacheRemote.size();
-    for (auto& t : ltags)
-        if (std::find(cacheRemote.begin(), cacheRemote.end(), t) == cacheRemote.end()) ++d.localOnly;
-    for (auto& t : cacheRemote)
-        if (std::find(ltags.begin(), ltags.end(), t) == ltags.end()) ++d.remoteOnly;
+    if (stale) FetchTagDiffAsync();    // 过期后台补拉，不阻塞渲染
     return d;
 }
 static void RefreshStatusAsync();
@@ -3455,7 +3478,8 @@ static void Layout() {
     int W = rc.right, H = rc.bottom;
     int m = (int)(6 * g_scale);
     int rowH = (int)(30 * g_scale);
-    int statH = (int)(150 * g_scale), cmdH = (int)(28 * g_scale);
+    int statH = g_statLineCnt * (int)(22 * g_scale) + (int)(16 * g_scale);   // 按行数自适应，免得撑出滚动条
+    int cmdH = (int)(28 * g_scale);
     int leftW = (int)(200 * g_scale);
     // 顶栏：标签宽度按文字实测（DPI 缩放下写死宽度会截断「操作目录:」）；输入框右缘贴「打开」按钮左缘
     int lblX = m + (int)(2 * g_scale), lblW = (int)(64 * g_scale), lblH = 20;
@@ -3541,10 +3565,10 @@ static void Layout() {
 // 状态卡渲染
 static void RenderStatus(std::vector<std::vector<Seg>>* lines) {
     SetWindowTextW(g_stat, L"");
-    RECT rc; GetClientRect(g_stat, &rc);
-    (void)rc;
+    g_statLineCnt = (int)lines->size();
     for (auto& ln : *lines) RichAppendLine(g_stat, ln);
     delete lines;
+    Layout();   // 行数变化 → 状态卡高度自适应
 }
 
 // ============================ 主窗口过程 ====================================
