@@ -21,6 +21,7 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <wininet.h>
+#include <tlhelp32.h>
 #include <string>
 #include <vector>
 #include <optional>
@@ -2306,11 +2307,15 @@ static void OpTagDel() {
     if (!EnsureRepo()) return;
     auto name = AskText(g_main, L"删除标签", L"要删除的标签名:");
     if (!name || name->empty()) return;
-    if (!Confirm(g_main, Fmt(L"确认删除本地标签 [%s]？", name->c_str()))) return;
+    // 本地/远端两个独立确认：只删远端也支持（不需要本地标签存在），避免"本地点了否"导致远端无法同步
+    bool delLocal = Confirm(g_main, Fmt(L"是否删除【本地】标签 [%s]？", name->c_str()));
+    bool delRemote = false;
+    if (!g_remote.empty())
+        delRemote = Confirm(g_main, Fmt(L"是否删除【远端 %s】上的同名标签？\n（远端删除不依赖本地，本地选否也能删远端）", g_remote.c_str()));
+    if (!delLocal && !delRemote) return;
     std::vector<JobCmd> cmds;
-    cmds.push_back({ G({ L"tag", L"-d", *name }), true });   // 本地可能早已删除（如上次远端推送失败只删成了本地），失败不阻断远端删除
-    if (!g_remote.empty() && Confirm(g_main, Fmt(L"是否同时删除远端（%s）上的同名标签？", g_remote.c_str())))
-        cmds.push_back({ G({ L"push", g_remote, L":refs/tags/" + *name }), false });
+    if (delLocal)  cmds.push_back({ G({ L"tag", L"-d", *name }), true });   // 本地可能早已删除，失败不阻断远端删除
+    if (delRemote) cmds.push_back({ G({ L"push", g_remote, L":refs/tags/" + *name }), false });
     ExecAsync(std::move(cmds));
 }
 static void OpBranchSw() {
