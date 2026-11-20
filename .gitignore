@@ -6,4 +6,6 @@ test_repo/
 *.png
 GitMenuTool.old
 GitMenuTool.ver
+GitMenuTool_test.exe
+GitMenuTool.exe.bak-*
 app_version.h

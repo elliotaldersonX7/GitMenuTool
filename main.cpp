@@ -1988,6 +1988,54 @@ static std::wstring LoadLastDir() {
 }
 
 // ============================ 状态卡 ========================================
+// 标签与远端的领先/落后（按 tag 名集合比较，与 commit 的 ahead/behind 同语义）
+// 状态卡每 4 秒刷新，ls-remote 走网络，故按 远端+仓库 做 30 秒缓存，避免频繁请求
+struct TagDiff { int localOnly = 0; int remoteOnly = 0; int localCnt = 0; int remoteCnt = 0; bool netOk = true; };
+static TagDiff ComputeTagDiff() {
+    TagDiff d;
+    std::wstring localTags = GitOut({ L"tag", L"-l" });
+    std::vector<std::wstring> ltags;
+    for (auto& l : SplitLines(localTags)) { std::wstring t = Trim(l); if (!t.empty()) ltags.push_back(t); }
+    d.localCnt = (int)ltags.size();
+
+    static std::wstring cacheKey;
+    static std::chrono::steady_clock::time_point cacheAt;
+    static std::vector<std::wstring> cacheRemote;
+    static bool cacheOk = false;
+    std::wstring key = g_repo + L"|" + g_remote;
+    auto now = std::chrono::steady_clock::now();
+    bool fresh = cacheOk && key == cacheKey &&
+                 std::chrono::duration_cast<std::chrono::seconds>(now - cacheAt).count() < 30;
+    if (!fresh) {
+        std::wstring out;
+        if (!g_remote.empty()) {
+            GitResult r = RunGit({ g_git, L"-C", g_repo, L"ls-remote", L"--tags", g_remote }, L"", 6000, 3000);
+            cacheOk = (r.rc == 0);
+            out = cacheOk ? r.out : L"";
+        } else cacheOk = false;
+        cacheRemote.clear();
+        if (cacheOk) {
+            for (auto& l : SplitLines(out)) {
+                size_t tab = l.find(L'\t');
+                if (tab == std::wstring::npos) continue;
+                std::wstring ref = Trim(l.substr(tab + 1));
+                const std::wstring pre = L"refs/tags/";
+                if (ref.rfind(pre, 0) != 0) continue;
+                std::wstring name = ref.substr(pre.size());
+                if (name.size() >= 3 && name.compare(name.size() - 3, 3, L"^{}") == 0) continue;  // 注解标签的解引用行去重
+                if (!name.empty()) cacheRemote.push_back(name);
+            }
+        }
+        cacheKey = key; cacheAt = now;
+    }
+    d.netOk = cacheOk;
+    d.remoteCnt = (int)cacheRemote.size();
+    for (auto& t : ltags)
+        if (std::find(cacheRemote.begin(), cacheRemote.end(), t) == cacheRemote.end()) ++d.localOnly;
+    for (auto& t : cacheRemote)
+        if (std::find(ltags.begin(), ltags.end(), t) == ltags.end()) ++d.remoteOnly;
+    return d;
+}
 static void RefreshStatusAsync();
 // 状态 worker：探测仓库状态，构建状态卡富文本（含流程卡/分支/上游/改动/远端）
 static std::vector<std::vector<Seg>>* BuildStatusSegs() {
@@ -2047,31 +2095,48 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     lines->push_back(flow);
     // 分支行
     lines->push_back({ SegT(L"分支：", STAT_TXT, true), SegT(L" " + branch + L" ", STAT_BLU, true, BG_BLU) });
-    // 与上游行
-    std::vector<Seg> up = { SegT(L"与上游：", STAT_TXT, true) };
-    std::wstring ab = GitOut({ L"rev-list", L"--left-right", L"--count", L"HEAD...@{u}" });
-    size_t tab = ab.find(L'\t');
-    if (tab != std::wstring::npos) {
-        std::wstring ahead = Trim(ab.substr(0, tab)), behind = Trim(ab.substr(tab + 1));
-        up.push_back(SegT(L" 领先上游 ", STAT_TXT));
-        up.push_back(SegT(L" " + ahead + L" ", STAT_BLU, true, BG_BLU));
-        up.push_back(SegT(L" / 落后 ", STAT_TXT));
-        up.push_back(SegT(L" " + behind + L" ", STAT_BLU, true, BG_BLU));
-    } else {
-        up.push_back(SegT(L"无上游跟踪", STAT_DIM));
-    }
-    lines->push_back(up);
-    // 改动行
+    // ① 工作区（有无未提交改动）
     std::wstring st = GitOut({ L"status", L"--porcelain" });
     int nTotal = 0, nUntracked = 0;
     for (auto& l : SplitLines(st)) if (!Trim(l).empty()) { ++nTotal; if (l.rfind(L"??", 0) == 0) ++nUntracked; }
     if (nTotal > 0) {
         std::wstring dtxt = L"未提交改动 " + std::to_wstring(nTotal) + L" 处";
         if (nUntracked) dtxt += L"（含未跟踪 " + std::to_wstring(nUntracked) + L"）";
-        lines->push_back({ SegT(L"● ", STAT_RED), SegT(L" ⚠ " + dtxt + L" ", STAT_ORG, false, BG_YLW) });
+        lines->push_back({ SegT(L"工作区：", STAT_TXT, true), SegT(L" ⚠ " + dtxt + L" ", STAT_ORG, false, BG_YLW) });
     } else {
-        lines->push_back({ SegT(L" ✔ 工作区干净（无未提交改动） ", STAT_GRN, false, BG_GRN) });
+        lines->push_back({ SegT(L"工作区：", STAT_TXT, true), SegT(L" ✔ 干净（无未提交改动） ", STAT_GRN, false, BG_GRN) });
     }
+    // ② 已提交（本地 vs 远端，谁领先谁显示 ↑+数量）
+    std::vector<Seg> cm = { SegT(L"已提交：", STAT_TXT, true) };
+    std::wstring ab = GitOut({ L"rev-list", L"--left-right", L"--count", L"HEAD...@{u}" });
+    size_t tab = ab.find(L'\t');
+    if (tab != std::wstring::npos) {
+        int ahead = _wtoi(Trim(ab.substr(0, tab)).c_str());
+        int behind = _wtoi(Trim(ab.substr(tab + 1)).c_str());
+        cm.push_back(SegT(L" 本地 ", STAT_TXT));
+        cm.push_back(ahead > 0 ? SegT(L" ↑" + std::to_wstring(ahead) + L" ", STAT_BLU, true, BG_BLU)
+                               : SegT(L" 0 ", STAT_DIM));
+        cm.push_back(SegT(L" / 远端 ", STAT_TXT));
+        cm.push_back(behind > 0 ? SegT(L" ↑" + std::to_wstring(behind) + L" ", STAT_BLU, true, BG_BLU)
+                                : SegT(L" 0 ", STAT_DIM));
+    } else {
+        cm.push_back(SegT(L"无上游跟踪", STAT_DIM));
+    }
+    lines->push_back(cm);
+    // ③ 标签（同"已提交"的双向对比）
+    TagDiff td = ComputeTagDiff();
+    std::vector<Seg> tg = { SegT(L"标签：", STAT_TXT, true) };
+    if (td.netOk || td.remoteCnt > 0) {
+        tg.push_back(SegT(L" 本地 ", STAT_TXT));
+        tg.push_back(td.localOnly > 0 ? SegT(L" ↑" + std::to_wstring(td.localOnly) + L" ", STAT_BLU, true, BG_BLU)
+                                      : SegT(L" 0 ", STAT_DIM));
+        tg.push_back(SegT(L" / 远端 ", STAT_TXT));
+        tg.push_back(td.remoteOnly > 0 ? SegT(L" ↑" + std::to_wstring(td.remoteOnly) + L" ", STAT_BLU, true, BG_BLU)
+                                       : SegT(L" 0 ", STAT_DIM));
+    } else {
+        tg.push_back(SegT(L"远端标签未知（网络不可达，可配置代理）", STAT_DIM));
+    }
+    lines->push_back(tg);
     // 远端两行
     if (!g_remote.empty()) {
         lines->push_back({ SegT(L"远端名称(本地别名)：", STAT_TXT, true), SegT(L" " + g_remote + L" ", STAT_TXT, false, BG_GRY) });
