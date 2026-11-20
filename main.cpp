@@ -354,7 +354,8 @@ static std::wstring GetToolRepoTag() {
 }
 // ============================ 检查更新（GitHub Release）======================
 // WinINet 同步 GET（只在后台线程调用）；proxy=true 走系统代理，false 直连；失败返回空串
-static std::string HttpGetVia(bool useProxy, const std::wstring& url) {
+// onPct 非空且响应带 Content-Length 时按已收字节回调百分比（仅大文件下载用）
+static std::string HttpGetVia(bool useProxy, const std::wstring& url, void (*onPct)(int) = nullptr) {
     std::string out;
     HINTERNET hOpen = InternetOpenW(L"GitMenuTool",
         useProxy ? INTERNET_OPEN_TYPE_PRECONFIG : INTERNET_OPEN_TYPE_DIRECT, nullptr, nullptr, 0);
@@ -366,8 +367,17 @@ static std::string HttpGetVia(bool useProxy, const std::wstring& url) {
     HINTERNET hFile = InternetOpenUrlW(hOpen, url.c_str(), L"User-Agent: GitMenuTool\r\n", 0,
                                        INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE, 0);
     if (hFile) {
-        char buf[4096]; DWORD rd = 0;
-        while (InternetReadFile(hFile, buf, sizeof(buf), &rd) && rd) out.append(buf, rd);
+        DWORD len = 0, lenSize = sizeof(len);
+        BOOL haveLen = HttpQueryInfoW(hFile, HTTP_QUERY_CONTENT_LENGTH | HTTP_QUERY_FLAG_NUMBER, &len, &lenSize, nullptr);
+        char buf[4096]; DWORD rd = 0, acc = 0; int lastPct = -1;
+        while (InternetReadFile(hFile, buf, sizeof(buf), &rd) && rd) {
+            out.append(buf, rd);
+            if (onPct && haveLen && len) {                 // 按已收字节回调百分比（变化才发）
+                acc += rd;
+                int pct = (int)(acc * 100ULL / len);
+                if (pct != lastPct) { lastPct = pct; onPct(pct); }
+            }
+        }
         InternetCloseHandle(hFile);
     }
     InternetCloseHandle(hOpen);
@@ -385,11 +395,11 @@ static std::string HttpGetUtf8(const std::wstring& url, bool* rateLimited = null
                     || s2.find("rate limit") != std::string::npos;
     return "";
 }
-// 下载 exe 二进制：直连优先（>100KB 视为有效，错误页只有几百字节），无效再走系统代理
-static std::string HttpDownload(const std::wstring& url) {
-    std::string s = HttpGetVia(false, url);
+// 下载 exe 二进制：直连优先（>100KB 视为有效，错误页只有几百字节），无效再走系统代理；onPct 透传进度回调
+static std::string HttpDownload(const std::wstring& url, void (*onPct)(int) = nullptr) {
+    std::string s = HttpGetVia(false, url, onPct);
     if (s.size() > 100 * 1024) return s;
-    s = HttpGetVia(true, url);
+    s = HttpGetVia(true, url, onPct);
     if (s.size() > 100 * 1024) return s;
     return "";
 }
@@ -1028,6 +1038,7 @@ static const UINT WM_APP_JOBDONE = WM_APP + 2;
 static const UINT WM_APP_STATUS  = WM_APP + 3;                      // wParam=segments(堆)
 static const UINT WM_APP_UPDATE  = WM_APP + 4;                      // wParam=UpdateResult*(堆) lParam=1自动/0手动
 static const UINT WM_APP_UPGRADE = WM_APP + 5;                      // wParam=UpgradeResult*(堆)
+static const UINT WM_APP_DLPCT   = WM_APP + 6;                      // wParam=下载百分比(0~100)
 // 单任务串行：逐条执行，非 optional 失败即中止；SPECIAL 命令见 HandleSpecial
 static void HandleSpecial(const std::vector<std::wstring>& argv);
 static void ExecAsync(std::vector<JobCmd> cmds) {
@@ -1301,10 +1312,23 @@ struct UpdateResult {
     bool rateLimit = false;        // kind=2 时区分：GitHub 匿名配额用尽 / 一般网络问题
 };
 static HWND g_hAboutDlg = nullptr;          // 关于弹窗（开着时检查结果写回弹窗）
+static HWND g_hAskDlg = nullptr;            // 检测到新版本二级弹窗（开着时下载进度写回其下载按钮）
 static std::atomic<bool> g_updateRunning{ false };
 static bool g_updateNagged = false;         // 自动检测的新版提示每会话只弹一次
-// 当前显示的版本（关于弹窗口径）：仓库标签优先，无标签回退内置版本号
-static std::wstring CurAppVersion() { return g_repoTag.empty() ? std::wstring(APP_VERSION) : g_repoTag; }
+// 当前显示的版本（关于弹窗口径）：升级标记 > 仓库标签 > 内置版本号
+// 换身升级只替换 exe，本地仓库标签不变；升级成功时写标记文件记录已到的版本，避免升级后再误报新版本
+static std::wstring CurAppVersion() {
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::wifstream f(fs::path(exePath).parent_path() / L"GitMenuTool.ver");
+    if (f) {
+        std::wstring t;
+        std::getline(f, t);
+        t = Trim(t);
+        if (!t.empty()) return t;
+    }
+    return g_repoTag.empty() ? std::wstring(APP_VERSION) : g_repoTag;
+}
 /**
   ******************************************************************************
   * @brief    后台线程检查 GitHub 最新 Release（releases/latest）
@@ -1349,20 +1373,24 @@ static std::wstring UpdateFoundText(const UpdateResult& r) {
 struct UpgradeResult {
     bool ok = false;
     std::wstring msg;              // ok=新 exe 临时文件路径；!ok=失败原因
+    std::wstring tag;              // 本次下载的新版标签（换身成功后写入升级标记）
 };
 static std::atomic<bool> g_upgrading{ false };
 /**
   ******************************************************************************
   * @brief    后台线程下载新版本 exe 到 %TEMP%
   * @param    url exe 附件直链（调用前应确认 g_updateRunning 已被本函数占用）
+  * @param    tag 本次下载的新版标签（随结果带回，换身成功后写升级标记）
+  * @param    onPct 下载进度回调（百分比 0~100，可为 nullptr）
   * @retval   None
   * @note     结果经 WM_APP_UPGRADE 投递主线程执行换身；>100KB 防把错误页当 exe
   ******************************************************************************
   */
-static void DownloadAsync(const std::wstring& url) {
-    std::thread([url]() {
+static void DownloadAsync(const std::wstring& url, const std::wstring& tag = L"", void (*onPct)(int) = nullptr) {
+    std::thread([url, tag, onPct]() {
         auto* ur = new UpgradeResult();
-        std::string data = HttpDownload(url);
+        ur->tag = tag;
+        std::string data = HttpDownload(url, onPct);
         if (data.size() > 100 * 1024) {   // exe 至少几百 KB，防 403/404 错误页被误存
             wchar_t tmp[MAX_PATH] = {};
             GetTempPathW(MAX_PATH, tmp);
@@ -1383,12 +1411,13 @@ static void DownloadAsync(const std::wstring& url) {
   ******************************************************************************
   * @brief    换身：当前 exe 改名 .old 让位 → 新 exe 顶上原位 → 延迟删 .old → 重启新 exe
   * @param    tmpExe 已下载的新版本 exe 临时路径
+  * @param    newTag 新版标签（非空时写入升级标记文件，供重启后识别版本）
   * @retval   空串=成功已安排重启；否则返回失败原因（.old 已回滚原名）
   * @note     Windows 允许改名运行中的 exe；跨卷移动需 MOVEFILE_COPY_ALLOWED；
   *           杀软可能短暂锁文件，各步 5 次×300ms 重试
   ******************************************************************************
   */
-static std::wstring DoUpgradeSwap(const std::wstring& tmpExe) {
+static std::wstring DoUpgradeSwap(const std::wstring& tmpExe, const std::wstring& newTag = L"") {
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     fs::path cur(exePath), oldf = cur; oldf.replace_extension(L".old");
@@ -1408,6 +1437,10 @@ static std::wstring DoUpgradeSwap(const std::wstring& tmpExe) {
     if (!ok) {   // 回滚：把 .old 改回原名，工具不受影响
         MoveFileExW(oldf.c_str(), cur.c_str(), MOVEFILE_COPY_ALLOWED);
         return L"新版本文件就位失败，已恢复原版本";
+    }
+    if (!newTag.empty()) {   // 写升级标记：本地仓库标签不随换身变化，重启后据此识别新版本
+        std::ofstream vf(cur.parent_path() / L"GitMenuTool.ver", std::ios::binary | std::ios::trunc);
+        if (vf) vf << std::string(newTag.begin(), newTag.end());   // 标签为 ASCII，按窄字符落盘
     }
     // ③ 延迟 2 秒删除 .old（当前进程还占着映像）
     STARTUPINFOW si = { sizeof(si) }; si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
@@ -1441,9 +1474,13 @@ struct AboutState {
     int y1 = 0;                                       // 按钮行基线（检查更新）
 };
 static AboutState g_aboutState;
-// 二级弹窗（检测到新版本）状态：done=已关闭 go=选了下载
+// 下载进度：后台线程投递百分比到主线程（写回二级弹窗的下载按钮）
+static void PostDlPct(int pct) { PostMessageW(g_main, WM_APP_DLPCT, (WPARAM)pct, 0); }
+// 二级弹窗（检测到新版本）状态：done=已关闭 downloading=已开始下载（按钮原地显示百分比）
 struct UpdateAskState {
-    bool done = false, go = false;
+    bool done = false, downloading = false;
+    std::wstring url;                                 // 新版 exe 直链（点下载时用）
+    std::wstring tag;                                 // 新版标签（写升级标记用）
 };
 /**
   ******************************************************************************
@@ -1451,7 +1488,8 @@ struct UpdateAskState {
   * @param    h 二级弹窗句柄
   * @param    data UpdateAskState 指针（创建弹窗时挂入）
   * @retval   None
-  * @note     下载走 IDYES，忽略/关闭都视为不下载
+  * @note     下载开始后弹窗不关：忽略钮禁用、下载钮原地变百分比；进度经 WM_APP_DLPCT
+  *           写回，完成后 WM_APP_UPGRADE 关闭本弹窗再走换身/失败提示
   ******************************************************************************
   */
 static LRESULT CALLBACK UpdateAskSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
@@ -1459,10 +1497,19 @@ static LRESULT CALLBACK UpdateAskSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PT
     switch (m) {
     case WM_COMMAND: {
         int id = LOWORD(w);
-        if (id == IDYES) { st->go = true; st->done = true; DestroyWindow(h); return 0; }
+        if (id == IDYES && !st->downloading) {         // 下载：弹窗保持，按钮原地变百分比
+            st->downloading = true;
+            EnableWindow(GetDlgItem(h, IDNO), FALSE);  // 下载中不可再点忽略
+            SetWindowTextW(GetDlgItem(h, IDYES), L"0%");
+            DownloadAsync(st->url, st->tag, PostDlPct);
+            return 0;
+        }
         if (id == IDNO || id == IDCANCEL) { st->done = true; DestroyWindow(h); return 0; }
         return 0;
     }
+    case WM_DESTROY:
+        g_hAskDlg = nullptr;
+        return 0;
     case WM_CLOSE:
         st->done = true;
         DestroyWindow(h);
@@ -1473,13 +1520,14 @@ static LRESULT CALLBACK UpdateAskSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PT
 /**
   ******************************************************************************
   * @brief    二级弹窗：检测到新版本，提供 下载/忽略 两个按钮
-  * @param    parent 父窗口（关于弹窗，弹窗期间被禁用）
+  * @param    parent 父窗口（关于弹窗或主窗，弹窗期间被禁用）
   * @param    r 检查结果（kind=0 时调用）
-  * @retval   true=点【下载】；false=点【忽略】或关闭
-  * @note     高度按说明文字实测换行行数自适应；选下载后由调用方启动下载流程
+  * @retval   None
+  * @note     高度按说明文字实测换行行数自适应；点下载后弹窗保持，下载按钮原地显示
+  *           百分比，下载结束由 WM_APP_UPGRADE 关闭本弹窗并收尾
   ******************************************************************************
   */
-static bool UpdateAskPopup(HWND parent, const UpdateResult& r) {
+static void UpdateAskPopup(HWND parent, const UpdateResult& r) {
     std::wstring text = UpdateFoundText(r)
         + L"\n\n是否下载新版本并自动重启工具？\n（若杀毒软件拦截 exe 替换，请选择允许后重试）";
     int m = (int)(12 * g_scale), btnH = (int)(26 * g_scale), bw = (int)(80 * g_scale), gap = (int)(8 * g_scale);
@@ -1510,8 +1558,11 @@ static bool UpdateAskPopup(HWND parent, const UpdateResult& r) {
     SendMessageW(hGo, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
     SendMessageW(hNo, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
     UpdateAskState st;
+    st.url = r.exeUrl;
+    st.tag = r.tag;
     SetWindowSubclass(dlg, UpdateAskSub, 1, (DWORD_PTR)&st);
     EnableWindow(parent, FALSE);
+    g_hAskDlg = dlg;
     ShowWindow(dlg, SW_SHOW);
     SetFocus(hGo);
     MSG msg;
@@ -1522,7 +1573,6 @@ static bool UpdateAskPopup(HWND parent, const UpdateResult& r) {
     }
     EnableWindow(parent, TRUE);
     SetActiveWindow(parent);
-    return st.go;
 }
 /**
   ******************************************************************************
@@ -1535,24 +1585,19 @@ static bool UpdateAskPopup(HWND parent, const UpdateResult& r) {
   */
 static void AboutApplyResult(HWND dlg, const UpdateResult& r) {
     HWND hCheck = GetDlgItem(dlg, IDC_ABOUT_CHECK);
-    SetWindowTextW(hCheck, L"检查更新");           // 先恢复按钮文字（检查中提示已结束）
     if (r.kind == 0) {
-        if (UpdateAskPopup(dlg, r)) {          // 下载：进入下载流程，进度提示写在本按钮上
-            EnableWindow(hCheck, FALSE);
-            SetWindowTextW(hCheck, L"正在下载…");
-            DownloadAsync(r.exeUrl);
-            return;
-        }
+        UpdateAskPopup(dlg, r);        // 选择框：点下载后弹窗保持，下载按钮原地显示百分比
     } else if (r.kind == 1) {
         MessageBoxW(dlg, L"已是最新版本。", L"检查更新", MB_OK | MB_ICONINFORMATION);   // 已最新：只弹提示框
     } else {
-        // 失败：弹提示框（状态区仅单行，放不下两行说明）
+        // 失败：弹提示框
         MessageBoxW(dlg,
             r.rateLimit ? L"检查失败：GitHub 接口访问配额已用完（匿名每小时 60 次）。\n请一小时后再试，或到 github 发布页手动查看。"
                         : L"检查失败：无法连接更新服务器（或仓库暂无发布版本）。\n请确认电脑可以上网后，再点一次【检查更新】。",
             L"检查更新", MB_OK | MB_ICONWARNING);
     }
-    EnableWindow(hCheck, TRUE);   // 下载中保持禁用，其余情况恢复
+    EnableWindow(hCheck, TRUE);        // 恢复检查按钮（换身成功会直接退出进程，走不到这）
+    SetWindowTextW(hCheck, L"检查更新");
 }
 static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
     AboutState* st = (AboutState*)data;
@@ -1582,12 +1627,12 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
 /**
   ******************************************************************************
   * @brief    关于弹窗：工具名 + 当前版本 + 作者 + github发布页链接 + 检查更新
-  * @param    pre 非空时预填检查结果（自动检测弹出版），可传 nullptr
+  * @param    None
   * @retval   None
-  * @note     模态骨架与 AskText 相同（子类过程收命令 + 循环只泵消息）；结果异步回填
+  * @note     模态骨架与 AskText 相同（子类过程收命令 + 循环只泵消息）；仅用户手动点击时打开
   ******************************************************************************
   */
-static void ShowAboutDialog(const UpdateResult* pre) {
+static void ShowAboutDialog() {
     AboutState& s = g_aboutState;
     s.done = false;
     s.m = (int)(10 * g_scale); s.btnH = (int)(26 * g_scale);
@@ -1633,7 +1678,6 @@ static void ShowAboutDialog(const UpdateResult* pre) {
     EnableWindow(g_main, FALSE);
     g_hAboutDlg = dlg;
     ShowWindow(dlg, SW_SHOW);
-    if (pre) AboutApplyResult(dlg, *pre);   // 自动检测到新版弹出：先亮弹窗再弹二级结果框
     MSG msg;
     while (!s.done && GetMessageW(&msg, nullptr, 0, 0)) {
         if (IsDialogMessageW(dlg, &msg)) continue;
@@ -3188,7 +3232,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id == IDC_OPENIGN) { OpOpenIgnore(); return 0; }
         if (id == IDC_RESET) { OpResetGit(); return 0; }
         if (id == IDM_CLONE) { OpClone(); return 0; }
-        if (id == IDC_ABOUT) { ShowAboutDialog(nullptr); return 0; }
+        if (id == IDC_ABOUT) { ShowAboutDialog(); return 0; }
         if (id >= IDM_BASE && id < IDM_BASE + 100) {
             for (auto& cat : MENU)
                 for (auto& item : cat.items)
@@ -3227,41 +3271,49 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         InvalidateRect(g_leftPanel, nullptr, FALSE);   // g_flowBlock 可能变化，左栏灰/亮态同步重绘
         return 0;
     case WM_APP_UPDATE: {
-        // 检查更新结果：弹窗开着→回填（已最新/新版本弹二级框、失败写状态区）；否则自动模式发现新版→弹关于弹窗（每会话一次），其余静默
+        // 检查更新结果：弹窗开着→回填（已最新/新版本弹二级框，下载提示在按钮上）；否则自动模式发现新版→直接弹二级选择框（每会话一次），其余静默
         UpdateResult* r = (UpdateResult*)w;
         bool autoMode = l != 0;
         if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
             AboutApplyResult(g_hAboutDlg, *r);
         } else if (autoMode && r->kind == 0 && !g_updateNagged) {
             g_updateNagged = true;   // 本次会话不再自动弹，手动检查仍可用
-            ShowAboutDialog(r);
+            UpdateAskPopup(g_main, *r);   // 不弹"关于"，只弹选择框；下载百分比显示在下载按钮上
         }
         delete r;
         return 0;
     }
+    case WM_APP_DLPCT:
+        // 下载进度：写回二级弹窗的下载按钮（弹窗已关则丢弃）
+        if (g_hAskDlg && IsWindow(g_hAskDlg))
+            SetWindowTextW(GetDlgItem(g_hAskDlg, IDYES), (std::to_wstring((int)w) + L"%").c_str());
+        return 0;
     case WM_APP_UPGRADE: {
-        // 一键升级结果：ok 时 msg=新 exe 临时路径 → 换身 + 自动重启；失败显示原因
+        // 升级结果：ok 时 msg=新 exe 临时路径 → 换身 + 自动重启；失败弹提示框（关于弹窗开着则挂它，否则挂主窗）
+        if (g_hAskDlg && IsWindow(g_hAskDlg)) SendMessageW(g_hAskDlg, WM_CLOSE, 0, 0);   // 先关进度弹窗
         UpgradeResult* ur = (UpgradeResult*)w;
         if (ur->ok) {
-            std::wstring err = DoUpgradeSwap(ur->msg);
+            std::wstring err = DoUpgradeSwap(ur->msg, ur->tag);
             if (err.empty()) {
                 ExitProcess(0);   // 新 exe 已启动。不能依赖 WM_CLOSE/PostQuitMessage：自动弹窗的嵌套模态循环会吞掉唯一一条 WM_QUIT，外层消息循环收不到、进程退不掉
             }
+            std::wstring t = L"升级失败：" + err + L"\n可到 github 发布页手动下载安装。";
             if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
                 HWND hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_CHECK);
                 EnableWindow(hBtn, TRUE);
                 SetWindowTextW(hBtn, L"检查更新");
-                std::wstring t = L"升级失败：" + err + L"\n可到 github 发布页手动下载安装。";
-                MessageBoxW(g_hAboutDlg, t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
             }
+            MessageBoxW((g_hAboutDlg && IsWindow(g_hAboutDlg)) ? g_hAboutDlg : g_main,
+                        t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
         } else {
+            std::wstring t = L"升级失败：" + ur->msg + L"\n可到 github 发布页手动下载安装。";
             if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
                 HWND hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_CHECK);
                 EnableWindow(hBtn, TRUE);
                 SetWindowTextW(hBtn, L"检查更新");
-                std::wstring t = L"升级失败：" + ur->msg + L"\n可到 github 发布页手动下载安装。";
-                MessageBoxW(g_hAboutDlg, t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
             }
+            MessageBoxW((g_hAboutDlg && IsWindow(g_hAboutDlg)) ? g_hAboutDlg : g_main,
+                        t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
         }
         delete ur;
         return 0;
@@ -3298,9 +3350,30 @@ static HFONT MkFont(int pt, bool bold, const wchar_t* face) {
                        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
 }
+/**
+  ******************************************************************************
+  * @brief    启动清理：删除上次升级遗留的 GitMenuTool_old.exe
+  * @param    None
+  * @retval   None
+  * @note     升级时只起了一个延迟 2 秒的 cmd 删除，杀软短暂锁文件会失败遗留；
+  *           本函数在新 exe 启动时兜底重试，此时旧进程已退出、锁必释放
+  ******************************************************************************
+  */
+static void CleanupOldExe() {
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    fs::path oldf = fs::path(exePath);
+    oldf.replace_extension(L".old");
+    std::error_code ec;
+    for (int i = 0; i < 5 && fs::exists(oldf, ec); ++i) {
+        fs::remove(oldf, ec);
+        if (fs::exists(oldf, ec)) Sleep(300);
+    }
+}
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_hInst = hInst;
     MakeDpiAware();
+    CleanupOldExe();   // 上次升级遗留的 .old 兜底删除
     InitCommonControls();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);   // Shell 对话框需要 COM
     LoadLibraryW(L"Riched20.dll");   // RichEdit 控件库（RICHEDIT_CLASS）
