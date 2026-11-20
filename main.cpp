@@ -1572,6 +1572,18 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
         int id = LOWORD(w);
         if (id == IDC_ABOUT_CHECK) {
             HWND hBtn = GetDlgItem(h, IDC_ABOUT_CHECK);
+            AboutState& s = g_aboutState;
+            HWND hRes = GetDlgItem(h, IDC_ABOUT_RESULT);   // 清掉上次结果：结果不是常驻，仅显示到下次检查
+            HWND hDl = GetDlgItem(h, IDC_ABOUT_DL);
+            if (hRes) ShowWindow(hRes, SW_HIDE);
+            if (hDl) ShowWindow(hDl, SW_HIDE);
+            int baseCh = s.y1 + s.btnH + s.m;              // 弹窗收回基础高度
+            if (s.ch != baseCh) {
+                RECT fr; GetWindowRect(h, &fr);
+                SetWindowPos(h, nullptr, 0, 0, fr.right - fr.left, fr.bottom - fr.top + (baseCh - s.ch),
+                             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                s.ch = baseCh;
+            }
             EnableWindow(hBtn, FALSE);
             SetWindowTextW(hBtn, L"正在检查…");
             CheckUpdateAsync(false);
