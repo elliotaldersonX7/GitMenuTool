@@ -175,7 +175,7 @@ static double g_scale = 1.0;
 static std::wstring g_git, g_repo, g_remote, g_statUrl;
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
-static int g_flowBlock = -1;              // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；-1=流程完成。④远端+首推为可选环节，不产生卡点）
+static std::atomic<int> g_flowBlock{ -1 };  // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；-1=流程完成。④远端+首推为可选环节，不产生卡点）。状态 worker 线程写、UI 线程读，用原子量
 static int g_leftScroll = 0, g_leftTotalH = 0;
 
 // ============================ 基础工具 ======================================
@@ -305,7 +305,7 @@ static GitResult RunGit(const std::vector<std::wstring>& argv, const std::wstrin
     CloseHandle(wr);
     if (!ok) { CloseHandle(rd); r.out = L"启动进程失败: " + cl; return r; }
     CloseHandle(pi.hThread);
-    DWORD deadline = GetTickCount() + timeoutMs;
+    ULONGLONG deadline = GetTickCount64() + timeoutMs;   // GetTickCount64 防 49.7 天回绕误判超时
     std::string raw; char buf[8192]; DWORD n = 0;
     for (;;) {
         if (!PeekNamedPipe(rd, nullptr, 0, nullptr, &n, nullptr)) break;
@@ -321,7 +321,7 @@ static GitResult RunGit(const std::vector<std::wstring>& argv, const std::wstrin
                 }
                 break;
             }
-            if (GetTickCount() > deadline) {
+            if (GetTickCount64() > deadline) {
                 TerminateProcess(pi.hProcess, 1);
                 CloseHandle(rd); CloseHandle(pi.hProcess);
                 r.rc = 1; r.out = Fmt(L"[超时 %u 秒，命令已终止]", timeoutMs / 1000);
@@ -1002,8 +1002,8 @@ static LRESULT CALLBACK OutProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_SIZE: {
-        UpdateOutScroll(h);   // 客户区变化时同步两条滚动条范围
-        InvalidateRect(h, nullptr, FALSE);
+        UpdateOutScroll(h);              // 客户区变化时同步两条滚动条范围
+        OutScrollXTo(h, g_logScrollX);   // 变宽/变窄后回夹横向偏移，保持变量与滑块一致
         return 0;
     }
     case WM_MOUSEWHEEL: {
@@ -1378,10 +1378,7 @@ static bool CheckUpdateAsync(bool autoMode) {
         if (!tag.empty()) {
             r->tag = tag;
             r->notes = JsonUnescape(JsonGetStringRaw(json, "body"));
-            // 当前版本是该 tag 的后继开发串（tag-N-gxxx，HEAD 已越过发布 tag 未发新版）时视为已最新
-            std::wstring cur = CurAppVersion();
-            bool devAhead = cur.rfind(tag + L"-", 0) == 0;
-            r->kind = (!devAhead && VersionCompare(tag, cur) > 0) ? 0 : 1;
+            r->kind = VersionCompare(tag, CurAppVersion()) > 0 ? 0 : 1;
             if (r->kind == 0) r->exeUrl = JsonGetAssetExe(json);
         }   // 其余保持 kind=2（网络失败/限流）
         PostMessageW(g_main, WM_APP_UPDATE, (WPARAM)r, (LPARAM)(autoMode ? 1 : 0));
@@ -1500,7 +1497,7 @@ struct AboutState {
     bool done = false;
     bool downloading = false;                         // 新版下载进行中（下载按钮显示百分比）
     std::wstring dlUrl;                               // 新版 exe 直链（点下载时用）
-    int w = 0, ch = 0, m = 0, bw = 0, btnH = 0, gap = 0;
+    int w = 0, ch = 0, m = 0, bw = 0, btnH = 0;
     int linkY = 0, linkH = 0;                         // github 发布页链接行基线/高度（紧贴按钮行上方）
     int y1 = 0;                                       // 按钮行基线（检查更新）
 };
@@ -1620,7 +1617,12 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
         if (id == IDC_ABOUT_CHECK) {
             HWND hBtn = GetDlgItem(h, IDC_ABOUT_CHECK);
             AboutState& s = g_aboutState;
-            HWND hRes = GetDlgItem(h, IDC_ABOUT_RESULT);   // 清掉上次结果：结果不是常驻，仅显示到下次检查
+            if (!CheckUpdateAsync(false)) {                // 已有检查/下载在进行：不动结果区，恢复按钮即可
+                EnableWindow(hBtn, TRUE);
+                SetWindowTextW(hBtn, L"检查更新");
+                return 0;
+            }
+            HWND hRes = GetDlgItem(h, IDC_ABOUT_RESULT);   // 启动成功才清上次结果：结果不是常驻，仅显示到下次检查
             HWND hDl = GetDlgItem(h, IDC_ABOUT_DL);
             if (hRes) ShowWindow(hRes, SW_HIDE);
             if (hDl) ShowWindow(hDl, SW_HIDE);
@@ -1630,11 +1632,6 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
                 SetWindowPos(h, nullptr, 0, 0, fr.right - fr.left, fr.bottom - fr.top + (baseCh - s.ch),
                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
                 s.ch = baseCh;
-            }
-            if (!CheckUpdateAsync(false)) {                // 已有检查/下载在进行：恢复按钮，在飞的结果稍后自动回填
-                EnableWindow(hBtn, TRUE);
-                SetWindowTextW(hBtn, L"检查更新");
-                return 0;
             }
             EnableWindow(hBtn, FALSE);
             SetWindowTextW(hBtn, L"正在检查…");
@@ -1681,7 +1678,7 @@ static void ShowAboutDialog(const UpdateResult* pre) {
     AboutState& s = g_aboutState;
     s.done = false;
     s.m = (int)(10 * g_scale); s.btnH = (int)(26 * g_scale);
-    s.bw = (int)(95 * g_scale); s.gap = (int)(6 * g_scale);
+    s.bw = (int)(95 * g_scale);
     s.w = (int)(300 * g_scale);
     // 链接行整行显示不折行：按 9pt 字体实测文字宽度撑大弹窗最小宽度
     const std::wstring linkText = L"github发布页：https://github.com/elliotaldersonX7/GitMenuTool/releases";
@@ -2346,17 +2343,11 @@ struct PickCommitState {
     std::wstring picked;
     bool done = false, ok = false;
 };
-// 临时追踪日志（定位"按OK无反应"问题，闭环后移除）
-static void TraceLog(const std::wstring& s) {
-    FILE* f = _wfopen(L"C:\\Users\\liuao\\.codebuddy\\work\\git_tool_cpp\\pick_trace.log", L"a, ccs=UTF-8");
-    if (f) { fwprintf(f, L"%s\n", s.c_str()); fclose(f); }
-}
 static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
     PickCommitState* st = (PickCommitState*)data;
     switch (m) {
     case WM_COMMAND: {
         int id = LOWORD(w), code = HIWORD(w);
-        TraceLog(Fmt(L"WM_COMMAND id=%d code=%d", id, code));
         // 选中变化即记录（SELCHANGE 时新行已是当前项），不依赖确定瞬间再读
         if (id == 200 && code == LBN_SELCHANGE) {
             st->sel = (int)SendMessageW(st->hList, LB_GETCURSEL, 0, 0);
@@ -2366,7 +2357,6 @@ static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UIN
         if (id == IDOK || (id == 200 && code == LBN_DBLCLK)) {
             int sel = (int)SendMessageW(st->hList, LB_GETCURSEL, 0, 0);
             if (sel < 0 && st->sel >= 0) sel = st->sel;   // 兜底：确定瞬间读不到就用最近一次选中
-            TraceLog(Fmt(L"OK分支: sel=%d", sel));
             if (sel < 0) { MessageBoxW(h, L"请先在列表中点选一条提交。", L"提示", MB_OK | MB_ICONINFORMATION); return 0; }
             st->sel = sel;
             // 选中行全文（SHA 内嵌在行首，直接从文本解析，不依赖索引映射）
@@ -2374,7 +2364,6 @@ static LRESULT CALLBACK PickCommitDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UIN
             if (len < 0) len = 0;
             std::wstring txt(len, L'\0');
             if (len > 0) SendMessageW(st->hList, LB_GETTEXT, (WPARAM)sel, (LPARAM)txt.data());
-            TraceLog(Fmt(L"OK分支: len=%d 文本头=%s", len, txt.substr(0, 15).c_str()));
             st->picked = txt;
             st->ok = true;
             st->done = true;
@@ -2489,15 +2478,12 @@ static void OpDeleteCommit() {
     std::wstring abbr = picked->substr(0, 10);
     bool hexOk = (abbr.size() == 10);
     for (wchar_t c : abbr) if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'))) hexOk = false;
-    TraceLog(Fmt(L"下游: abbr=%s hexOk=%d", abbr.c_str(), (int)hexOk));
     if (!hexOk) { Warn(g_main, L"选中行解析提交号失败，请重试。"); return; }
     std::wstring sha = Trim(GitOut({ L"rev-parse", abbr }));
-    TraceLog(Fmt(L"下游: rev-parse 结果长度=%d", (int)sha.size()));
     if (sha.size() != 40) { Warn(g_main, Fmt(L"提交号 %s 解析失败（不存在或有歧义）。", abbr.c_str())); return; }
     OutSep(); OutTxt(L"删除提交: 选中 " + sha.substr(0, 10));
     // 计数校验：0=选中的就是最新提交；空=命令异常（与"无内容"区分开，避免误判）
     std::wstring cnt = Trim(GitOut({ L"rev-list", L"--count", sha + L"..HEAD" }));
-    TraceLog(L"下游: cnt=" + cnt);
     if (cnt.empty()) {
         Warn(g_main, Fmt(L"提交计数读取异常（rev-list 无输出）。\n选中提交: %s\n请点【查看状态】确认仓库正常后重试。", sha.substr(0, 10).c_str()));
         return;
@@ -2506,7 +2492,6 @@ static void OpDeleteCommit() {
     // 工作区脏检查：reset --hard 会连未提交改动一起丢
     int dirty = 0;
     for (auto& l : SplitLines(GitOut({ L"status", L"--porcelain" }))) if (!Trim(l).empty()) ++dirty;
-    TraceLog(Fmt(L"下游: dirty=%d", dirty));
     if (dirty > 0 && !Confirm(g_main, Fmt(L"工作区还有 %d 处未提交改动，回退会把它们一并丢弃。\n如需保留请先 stash 收起或提交。继续？", dirty))) return;
     // 危险确认：逐条列出将删除的提交（最多列 10 条，超出只给计数）
     std::wstring note = L"【危险】将回退到所选提交，以下 " + cnt + L" 条提交及其文件内容将被删除：\n";
@@ -2521,7 +2506,6 @@ static void OpDeleteCommit() {
             L"· 已推送过远端的，删除后必须强制推送才能同步远端\n\n"
             L"确认删除请输入大写 Y（其他输入或留空=取消）：";
     auto y = AskText(g_main, L"删除提交（危险操作）", note);
-    TraceLog(Fmt(L"下游: 危险确认输入=%s", (y && !y->empty()) ? y->c_str() : L"(空/取消)"));
     if (!y || *y != L"Y") return;
     // 强推判定：上游存在且远端仍指向将被删除的提交
     std::vector<std::vector<std::wstring>> cmds;
@@ -3341,35 +3325,19 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_APP_UPGRADE: {
         // 升级结果：ok 时 msg=新 exe 临时路径 → 换身 + 自动重启；失败恢复按钮并弹提示框（弹窗开着挂它，否则挂主窗）
         UpgradeResult* ur = (UpgradeResult*)w;
-        if (ur->ok) {
-            std::wstring err = DoUpgradeSwap(ur->msg);
-            if (err.empty()) {
-                ExitProcess(0);   // 新 exe 已启动。不能依赖 WM_CLOSE/PostQuitMessage：模态循环会吞掉唯一一条 WM_QUIT，外层消息循环收不到、进程退不掉
-            }
-            std::wstring t = L"升级失败：" + err + L"\n可到 github 发布页手动下载安装。";
-            if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
-                HWND hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_CHECK);
-                EnableWindow(hBtn, TRUE); SetWindowTextW(hBtn, L"检查更新");
-                hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_DL);
-                if (hBtn) { EnableWindow(hBtn, TRUE); SetWindowTextW(hBtn, L"下载"); }
-                g_aboutState.downloading = false;
-                MessageBoxW(g_hAboutDlg, t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
-                delete ur;
-                return 0;
-            }
-            MessageBoxW(g_main, t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
+        std::wstring reason = ur->ok ? DoUpgradeSwap(ur->msg) : ur->msg;
+        if (ur->ok && reason.empty()) {
+            ExitProcess(0);   // 新 exe 已启动。不能依赖 WM_CLOSE/PostQuitMessage：模态循环会吞掉唯一一条 WM_QUIT，外层消息循环收不到、进程退不掉
+        }
+        std::wstring t = L"升级失败：" + reason + L"\n可到 github 发布页手动下载安装。";
+        if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
+            HWND hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_CHECK);
+            EnableWindow(hBtn, TRUE); SetWindowTextW(hBtn, L"检查更新");
+            hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_DL);
+            if (hBtn) { EnableWindow(hBtn, TRUE); SetWindowTextW(hBtn, L"下载"); }
+            g_aboutState.downloading = false;
+            MessageBoxW(g_hAboutDlg, t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
         } else {
-            std::wstring t = L"升级失败：" + ur->msg + L"\n可到 github 发布页手动下载安装。";
-            if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
-                HWND hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_CHECK);
-                EnableWindow(hBtn, TRUE); SetWindowTextW(hBtn, L"检查更新");
-                hBtn = GetDlgItem(g_hAboutDlg, IDC_ABOUT_DL);
-                if (hBtn) { EnableWindow(hBtn, TRUE); SetWindowTextW(hBtn, L"下载"); }
-                g_aboutState.downloading = false;
-                MessageBoxW(g_hAboutDlg, t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
-                delete ur;
-                return 0;
-            }
             MessageBoxW(g_main, t.c_str(), L"检查更新", MB_OK | MB_ICONWARNING);
         }
         delete ur;
