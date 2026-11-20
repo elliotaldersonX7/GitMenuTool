@@ -1586,11 +1586,13 @@ static void ShowResultInAbout(HWND dlg, const std::wstring& text, bool showDl,
   * @brief    关于弹窗回填检查结果：三种结果都集成进弹窗结果区，不再弹提示框
   * @param    dlg 关于弹窗句柄
   * @param    r 检查结果（kind 0=新版本 1=已最新 2=失败）
+  * @param    fromAuto true=后台自动检测的结果（不写入结果区，结果区只显示手动操作的结果）
   * @retval   None
-  * @note     启动自动弹窗与异步回填共用；下载进度显示在下载按钮上，完成后恢复按钮
+  * @note     启动自动弹窗走预填（fromAuto=false）；下载进度显示在下载按钮上，完成后恢复按钮
   ******************************************************************************
   */
-static void AboutApplyResult(HWND dlg, const UpdateResult& r) {
+static void AboutApplyResult(HWND dlg, const UpdateResult& r, bool fromAuto = false) {
+    if (fromAuto) return;              // 自动检测结果不写入结果区，避免未点检查就"已是最新版本"
     HWND hCheck = GetDlgItem(dlg, IDC_ABOUT_CHECK);
     if (r.kind == 0) {
         ShowResultInAbout(dlg, UpdateFoundText(r), true, r.exeUrl);   // 新版本号+升级内容+下载
@@ -1662,10 +1664,10 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
     }
     case WM_CTLCOLORSTATIC: {
         HDC dc = (HDC)w;
-        if ((HWND)l == GetDlgItem(h, IDC_ABOUT_LINK)) {   // 链接行：蓝字，底色用弹窗自身画刷（避免白底）
+        if ((HWND)l == GetDlgItem(h, IDC_ABOUT_LINK)) {   // 链接行：蓝字，底色取弹窗实际擦底画刷（避免白底）
             SetTextColor(dc, STAT_BLU);
             SetBkMode(dc, TRANSPARENT);
-            return (LRESULT)GetClassLongPtrW(h, GCLP_HBRBACKGROUND);
+            return (LRESULT)SendMessageW(h, WM_CTLCOLORDLG, (WPARAM)dc, (LPARAM)h);
         }
         break;
     }
@@ -3334,8 +3336,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         UpdateResult* r = (UpdateResult*)w;
         bool autoMode = l != 0;
         if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
-            if (autoMode && r->kind == 0) g_updateNagged = true;   // 弹窗开着时回填自动结果也算已提示过
-            AboutApplyResult(g_hAboutDlg, *r);
+            if (autoMode && r->kind == 0) g_updateNagged = true;   // 弹窗开着时自动发现新版也算已提示过
+            AboutApplyResult(g_hAboutDlg, *r, autoMode);           // 自动结果不写结果区，手动检查才显示
         } else if (autoMode && r->kind == 0 && !g_updateNagged) {
             g_updateNagged = true;   // 本次会话不再自动弹，手动检查仍可用
             ShowAboutDialog(r);
