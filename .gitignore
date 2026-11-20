@@ -6,3 +6,4 @@ test_repo/
 *.png
 GitMenuTool.old
 GitMenuTool.ver
+app_version.h

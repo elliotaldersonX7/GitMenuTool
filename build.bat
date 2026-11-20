@@ -12,6 +12,17 @@ if not defined VSDIR (
     exit /b 1
 )
 call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+rem Version alignment: generate app_version.h from git describe (tag the HEAD commit before a release build).
+rem NOTE: keep this .bat ASCII-only, cmd parses it with the ANSI codepage.
+set "APPTAG="
+for /f "usebackq delims=" %%i in (`git -C "%~dp0." describe --tags 2^>nul`) do set "APPTAG=%%i"
+if defined APPTAG (
+    echo [OK] inject APP_VERSION_STR = %APPTAG%
+    > "%~dp0app_version.h" echo #define APP_VERSION_STR L"%APPTAG%"
+) else (
+    echo [WARN] git describe failed, fallback APP_VERSION from main.cpp
+    if exist "%~dp0app_version.h" del "%~dp0app_version.h"
+)
 cl /nologo /std:c++17 /utf-8 /EHsc /MT /W3 /O2 /DUNICODE /D_UNICODE main.cpp ^
    /Fe:GitMenuTool.exe ^
    /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:app.manifest user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib wininet.lib

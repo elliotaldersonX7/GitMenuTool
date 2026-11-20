@@ -64,7 +64,14 @@ namespace fs = std::filesystem;
 
 // ============================ 全局 ==========================================
 static const wchar_t APP_TITLE[] = L"Git 菜单工具";
-static const wchar_t APP_VERSION[] = L"v20261117a";
+// 版本号：build.bat 构建时从 git describe 生成 app_version.h（与发布 tag 对齐）；
+// 无该头文件（直接 cl 编译）时用兜底值
+#if __has_include("app_version.h")
+#include "app_version.h"
+#else
+#define APP_VERSION_STR L"v20261117a"
+#endif
+static const wchar_t APP_VERSION[] = APP_VERSION_STR;
 static const wchar_t APP_AUTHOR[] = L"liuaolin";
 static const wchar_t UPDATE_API_URL[] = L"https://api.github.com/repos/elliotaldersonX7/GitMenuTool/releases/latest";
 static const wchar_t GITEA_HINT[] = L"https://github.com/用户名/仓库名.git";
