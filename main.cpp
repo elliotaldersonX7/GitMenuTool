@@ -1600,11 +1600,13 @@ static LRESULT CALLBACK AboutLinkSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PT
     case WM_SETCURSOR:
         SetCursor(LoadCursor(nullptr, IDC_HAND));
         return TRUE;
-    case WM_LBUTTONUP: {                    // 单击：打开链接
+    case WM_LBUTTONUP: {                    // 单击：打开链接（截取文本中的 http 段，跳过"发布页："前缀）
         int len = GetWindowTextLengthW(h);
-        std::wstring url(len, L'\0');
-        GetWindowTextW(h, &url[0], len + 1);
-        ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        std::wstring text(len, L'\0');
+        GetWindowTextW(h, &text[0], len + 1);
+        size_t p = text.find(L"http");
+        if (p != std::wstring::npos)
+            ShellExecuteW(nullptr, L"open", text.c_str() + p, nullptr, nullptr, SW_SHOWNORMAL);
         return 0;
     }
     }
