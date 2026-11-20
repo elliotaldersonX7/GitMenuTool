@@ -53,6 +53,7 @@ namespace fs = std::filesystem;
 #define IDC_OUT       120
 #define IDC_LEFT      121
 #define IDC_ABOUT     122
+#define IDC_PROXYCFG  123
 // 关于弹窗内部控件 id
 #define IDC_ABOUT_CHECK 3001
 #define IDC_ABOUT_INFO  3003
@@ -2644,6 +2645,24 @@ static void OpClone() {
     g_busy = false;
     RefreshStatusAsync();
 }
+// 代理配置：仅对 github.com 生效（内网 Gitea 的直连覆盖不受影响）；留空提交=清除代理恢复直连
+static void OpProxyCfg() {
+    std::wstring cur = Trim(GitOut({ L"config", L"--global", L"--get", L"http.https://github.com/.proxy" }));
+    auto r = AskText(g_main, L"代理配置（仅对 github.com 生效）",
+        L"github.com 代理地址（如 http://127.0.0.1:7890）:\n留空提交 = 清除代理恢复直连:", cur);
+    if (!r) return;
+    if (r->empty()) {
+        if (cur.empty()) { Info(g_main, L"当前未设置代理，无需清除。"); return; }
+        OutSep(); OutCmd(L"git config --global --unset http.https://github.com/.proxy");
+        Exec({ G({ L"config", L"--global", L"--unset", L"http.https://github.com/.proxy" }) });
+        OutTxt(L"已清除 github.com 代理（恢复直连）。");
+    } else {
+        OutSep(); OutCmd(L"git config --global http.https://github.com/.proxy " + *r);
+        ExecV({ G({ L"config", L"--global", L"http.https://github.com/.proxy", *r }),
+                G({ L"config", L"--global", L"--get", L"http.https://github.com/.proxy" }) });
+        OutTxt(L"已设置 github.com 代理，后续 推送/拉取 走该代理。");
+    }
+}
 static void OpResetGit() {
     if (!EnsureRepo()) return;
     fs::path gitdir = fs::path(g_repo) / L".git";
@@ -3109,6 +3128,7 @@ static void BuildControls() {
     MkBtn(g_main, L"清空输出", IDC_CLEAROUT, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"克隆仓库", IDM_CLONE, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"ℹ 关于", IDC_ABOUT, 0, 0, 0, 0, g_fontUI);   // 关于行（标题栏与操作目录行之间）
+    MkBtn(g_main, L"代理配置", IDC_PROXYCFG, 0, 0, 0, 0, g_fontUI);   // github 代理设置（在"关于"后面）
     // 状态按钮行
     MkBtn(g_main, L"⟳ 刷新状态", IDC_REFRESH, 0, 0, 0, 0, g_fontUI);
     MkBtn(g_main, L"⚙ 修改全局配置", IDC_GLOBALCFG, 0, 0, 0, 0, g_fontUI);
@@ -3167,6 +3187,7 @@ static void Layout() {
     // 关于行：标题栏与"操作目录"行之间，仅一个【ℹ 关于】按钮
     int row1Y = m + (int)(28 * g_scale) + (int)(4 * g_scale);
     MoveWindow(GetDlgItem(g_main, IDC_ABOUT), lblX, m, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
+    MoveWindow(GetDlgItem(g_main, IDC_PROXYCFG), lblX + (int)(94 * g_scale), m, (int)(90 * g_scale), (int)(24 * g_scale), TRUE);
     MoveWindow(g_topStatics[0], lblX, row1Y + 5, lblW, lblH, TRUE);
     int entryX = lblX + lblW + (int)(4 * g_scale);
     int entryR = W - (int)(308 * g_scale) - (int)(8 * g_scale);   /* 「打开」按钮左缘留 8px */
@@ -3265,6 +3286,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (id == IDC_RESET) { OpResetGit(); return 0; }
         if (id == IDM_CLONE) { OpClone(); return 0; }
         if (id == IDC_ABOUT) { ShowAboutDialog(nullptr); return 0; }
+        if (id == IDC_PROXYCFG) { OpProxyCfg(); return 0; }
         if (id >= IDM_BASE && id < IDM_BASE + 100) {
             for (auto& cat : MENU)
                 for (auto& item : cat.items)
