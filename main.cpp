@@ -1334,13 +1334,13 @@ static std::wstring CurAppVersion() {
   ******************************************************************************
   * @brief    后台线程检查 GitHub 最新 Release（releases/latest）
   * @param    autoMode true=自动检测（启动/10分钟周期）；false=弹窗内手动检查
-  * @retval   None
+  * @retval   true=已启动检查；false=已有检查/下载在进行，本次未启动
   * @note     结果经 WM_APP_UPDATE 投递主线程；自动模式失败静默，手动模式弹窗显示网络提示
   ******************************************************************************
   */
-static void CheckUpdateAsync(bool autoMode) {
+static bool CheckUpdateAsync(bool autoMode) {
     bool expected = false;
-    if (!g_updateRunning.compare_exchange_strong(expected, true)) return;   // 已有检查在进行
+    if (!g_updateRunning.compare_exchange_strong(expected, true)) return false;   // 已有检查/下载在进行
     std::thread([autoMode]() {
         auto* r = new UpdateResult();
         bool rate = false;
@@ -1356,6 +1356,7 @@ static void CheckUpdateAsync(bool autoMode) {
         PostMessageW(g_main, WM_APP_UPDATE, (WPARAM)r, (LPARAM)(autoMode ? 1 : 0));
         g_updateRunning = false;   // 线程内清零：自动弹窗的模态循环会卡住 handler，清零不能放 handler 里
     }).detach();
+    return true;
 }
 // 升级说明文本（限行数防弹窗过高：高度自适应仍设上限）：关于弹窗结果区的内容主体
 static std::wstring UpdateFoundText(const UpdateResult& r) {
@@ -1383,11 +1384,14 @@ static std::atomic<bool> g_upgrading{ false };
   * @param    url exe 附件直链（调用前应确认 g_updateRunning 已被本函数占用）
   * @param    tag 本次下载的新版标签（随结果带回，换身成功后写升级标记）
   * @param    onPct 下载进度回调（百分比 0~100，可为 nullptr）
-  * @retval   None
-  * @note     结果经 WM_APP_UPGRADE 投递主线程执行换身；>100KB 防把错误页当 exe
+  * @retval   true=已启动下载；false=已有检查/下载在进行，本次未启动
+  * @note     结果经 WM_APP_UPGRADE 投递主线程执行换身；>100KB 防把错误页当 exe；
+  *           下载期间占用 g_updateRunning，挡住定时自动检查插队
   ******************************************************************************
   */
-static void DownloadAsync(const std::wstring& url, const std::wstring& tag = L"", void (*onPct)(int) = nullptr) {
+static bool DownloadAsync(const std::wstring& url, const std::wstring& tag = L"", void (*onPct)(int) = nullptr) {
+    bool expected = false;
+    if (!g_updateRunning.compare_exchange_strong(expected, true)) return false;   // 已有检查/下载在进行
     std::thread([url, tag, onPct]() {
         auto* ur = new UpgradeResult();
         ur->tag = tag;
@@ -1407,6 +1411,7 @@ static void DownloadAsync(const std::wstring& url, const std::wstring& tag = L""
         PostMessageW(g_main, WM_APP_UPGRADE, (WPARAM)ur, 0);
         g_updateRunning = false;   // 与检查共用防重入标志，线程末尾清零（同已知教训）
     }).detach();
+    return true;
 }
 /**
   ******************************************************************************
@@ -1585,16 +1590,20 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
                 s.ch = baseCh;
             }
+            if (!CheckUpdateAsync(false)) {                // 已有检查/下载在进行：恢复按钮，在飞的结果稍后自动回填
+                EnableWindow(hBtn, TRUE);
+                SetWindowTextW(hBtn, L"检查更新");
+                return 0;
+            }
             EnableWindow(hBtn, FALSE);
             SetWindowTextW(hBtn, L"正在检查…");
-            CheckUpdateAsync(false);
             return 0;
         }
-        if (id == IDC_ABOUT_DL && !st->downloading) {  // 下载：弹窗保持，下载按钮原地变百分比
+        if (id == IDC_ABOUT_DL && !st->downloading) {      // 下载：弹窗保持，下载按钮原地变百分比
+            if (!DownloadAsync(st->dlUrl, st->dlTag, PostDlPct)) return 0;   // 已有任务在进行：忽略本次点击
             st->downloading = true;
             EnableWindow(GetDlgItem(h, IDC_ABOUT_CHECK), FALSE);
             SetWindowTextW(GetDlgItem(h, IDC_ABOUT_DL), L"0%");
-            DownloadAsync(st->dlUrl, st->dlTag, PostDlPct);
             return 0;
         }
         if (id == IDCANCEL) { st->done = true; DestroyWindow(h); return 0; }
@@ -3263,6 +3272,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         UpdateResult* r = (UpdateResult*)w;
         bool autoMode = l != 0;
         if (g_hAboutDlg && IsWindow(g_hAboutDlg)) {
+            if (autoMode && r->kind == 0) g_updateNagged = true;   // 弹窗开着时回填自动结果也算已提示过
             AboutApplyResult(g_hAboutDlg, *r);
         } else if (autoMode && r->kind == 0 && !g_updateNagged) {
             g_updateNagged = true;   // 本次会话不再自动弹，手动检查仍可用
