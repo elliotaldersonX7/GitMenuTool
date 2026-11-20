@@ -1515,6 +1515,7 @@ static void ShowResultInAbout(HWND dlg, const std::wstring& text, bool showDl,
     } else {                                                   // 再次检查：更新文本与位置
         SetWindowTextW(hText, text.c_str());
         MoveWindow(hText, s.m, yText, s.w - 2 * s.m, textH, TRUE);
+        ShowWindow(hText, SW_SHOW);                            // 点检查时曾隐藏，结果回来要重新显示
     }
     if (showDl) {                                              // 下载按钮：创建或更新后显示
         if (!hDl) {
