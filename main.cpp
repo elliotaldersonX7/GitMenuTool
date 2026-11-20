@@ -2429,6 +2429,7 @@ static void OpRemoteRename() {
     auto nw = AskText(g_main, L"远端改名(本地别名)", Fmt(L"现有远端名(本地别名): %s\n新远端名:", old.c_str()));
     if (!nw || nw->empty()) return;
     Exec({ G({ L"remote", L"rename", old, *nw }) });
+    RefreshStatusAsync();   // 立即刷新：g_remote 换成新别名，避免刷新前点推送用到旧名
 }
 static void OpTagNew() {
     if (!EnsureRepo()) return;
