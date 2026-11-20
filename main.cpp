@@ -1606,6 +1606,22 @@ static void AboutApplyResult(HWND dlg, const UpdateResult& r) {
     EnableWindow(hCheck, TRUE);        // 恢复检查按钮（换身成功会直接退出进程，走不到这）
     SetWindowTextW(hCheck, L"检查更新");
 }
+// 关于弹窗 github 链接行：手型光标 + 单击打开（与状态卡"远端地址"同款交互）
+static LRESULT CALLBACK AboutLinkSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR) {
+    switch (m) {
+    case WM_SETCURSOR:
+        SetCursor(LoadCursor(nullptr, IDC_HAND));
+        return TRUE;
+    case WM_LBUTTONUP: {                    // 单击：打开链接
+        int len = GetWindowTextLengthW(h);
+        std::wstring url(len, L'\0');
+        GetWindowTextW(h, &url[0], len + 1);
+        ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return 0;
+    }
+    }
+    return DefSubclassProc(h, m, w, l);
+}
 static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
     AboutState* st = (AboutState*)data;
     switch (m) {
@@ -1643,6 +1659,15 @@ static LRESULT CALLBACK AboutDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
         }
         if (id == IDCANCEL) { st->done = true; DestroyWindow(h); return 0; }
         return 0;
+    }
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = (HDC)w;
+        if ((HWND)l == GetDlgItem(h, IDC_ABOUT_LINK)) {   // 链接行：蓝字（同"远端地址"）
+            SetTextColor(dc, STAT_BLU);
+            SetBkMode(dc, TRANSPARENT);
+            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        }
+        break;
     }
     case WM_DESTROY:
         g_hAboutDlg = nullptr;
@@ -1696,15 +1721,15 @@ static void ShowAboutDialog(const UpdateResult* pre) {
     HWND hVer = CreateWindowExW(0, L"STATIC",
         (L"当前版本：" + CurAppVersion() + L"\n作者：" + APP_AUTHOR).c_str(), ctr,
         s.m, s.m + (int)(24 * g_scale), s.w - 2 * s.m, (int)(36 * g_scale), dlg, (HMENU)IDC_ABOUT_VER, g_hInst, nullptr);
-    HWND hLink = CreateWindowExW(0, L"EDIT", linkText.c_str(),
-        WS_CHILD | WS_VISIBLE | ES_READONLY | ES_CENTER,   // 只读编辑框：可点选/Ctrl+C 复制
+    HWND hLink = CreateWindowExW(0, L"STATIC", linkText.c_str(),
+        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOTIFY,   // SS_NOTIFY：静态可收鼠标消息
         s.m, s.linkY, s.w - 2 * s.m, s.linkH, dlg, (HMENU)IDC_ABOUT_LINK, g_hInst, nullptr);
     HWND hCheck = CreateWindowExW(0, L"BUTTON", L"检查更新", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         (s.w - s.bw) / 2, s.y1, s.bw, s.btnH, dlg, (HMENU)IDC_ABOUT_CHECK, g_hInst, nullptr);
     SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_fontUIBig, TRUE);   // 工具名大 3 号
     SendMessageW(hVer, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
     SendMessageW(hLink, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
-    SendMessageW(hLink, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);   // 去编辑框内边距，与原静态对齐
+    SetWindowSubclass(hLink, AboutLinkSub, 1, 0);   // 手型光标 + 单击打开链接
     SendMessageW(hCheck, WM_SETFONT, (WPARAM)g_fontUISmall, TRUE);
     SetWindowSubclass(dlg, AboutDlgSub, 1, (DWORD_PTR)&s);
     EnableWindow(g_main, FALSE);
