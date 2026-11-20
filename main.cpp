@@ -287,7 +287,8 @@ static std::vector<std::wstring> SplitLines(const std::wstring& s) {
 // ============================ git 子进程执行 ================================
 struct GitResult { int rc = -1; std::wstring out; };
 // 同步执行一条命令（capture 输出合并、超时强杀、隐藏窗口）
-static GitResult RunGit(const std::vector<std::wstring>& argv, const std::wstring& cwd, DWORD timeoutMs) {
+// idleMs>0 时启用"无响应看门狗"：连续 idleMs 毫秒无任何输出且进程未退出即终止（网络类命令防挂死）
+static GitResult RunGit(const std::vector<std::wstring>& argv, const std::wstring& cwd, DWORD timeoutMs, DWORD idleMs = 0) {
     GitResult r;
     std::wstring cl;
     for (size_t i = 0; i < argv.size(); ++i) { if (i) cl += L' '; cl += QuoteArg(argv[i]); }
@@ -307,10 +308,12 @@ static GitResult RunGit(const std::vector<std::wstring>& argv, const std::wstrin
     if (!ok) { CloseHandle(rd); r.out = L"启动进程失败: " + cl; return r; }
     CloseHandle(pi.hThread);
     ULONGLONG deadline = GetTickCount64() + timeoutMs;   // GetTickCount64 防 49.7 天回绕误判超时
+    ULONGLONG idleDeadline = idleMs ? GetTickCount64() + idleMs : 0;
     std::string raw; char buf[8192]; DWORD n = 0;
     for (;;) {
         if (!PeekNamedPipe(rd, nullptr, 0, nullptr, &n, nullptr)) break;
         if (n > 0) {
+            idleDeadline = idleMs ? GetTickCount64() + idleMs : 0;   // 有输出=有响应，重置无响应计时
             if (!ReadFile(rd, buf, sizeof(buf), &n, nullptr) || n == 0) break;
             raw.append(buf, n);
         } else {
@@ -321,6 +324,13 @@ static GitResult RunGit(const std::vector<std::wstring>& argv, const std::wstrin
                     raw.append(buf, n);
                 }
                 break;
+            }
+            if (idleDeadline && GetTickCount64() > idleDeadline) {   // 无响应看门狗：网络挂死快速失败
+                TerminateProcess(pi.hProcess, 1);
+                CloseHandle(rd); CloseHandle(pi.hProcess);
+                r.rc = 1;
+                r.out = Fmt(L"[无响应 %u 秒，命令已终止]\n网络不通？可在顶部【代理配置】设置代理后重试。", idleMs / 1000);
+                return r;
             }
             if (GetTickCount64() > deadline) {
                 TerminateProcess(pi.hProcess, 1);
@@ -1098,7 +1108,13 @@ static void ExecAsync(std::vector<JobCmd> cmds) {
             }
             JobMsg* m = new JobMsg{ 0, DispCmd(c.argv) };
             PostMessageW(g_main, WM_APP_JOBMSG, (WPARAM)m, 0);
-            GitResult r = RunGit(c.argv, repo, 1800 * 1000);
+            DWORD idleMs = 0;   // 网络类命令 10 秒无响应即终止报提示（本地命令不启用）
+            if (c.argv.size() > 3 && c.argv[1] == L"-c") {
+                const wchar_t* v = c.argv[3].c_str();
+                if (!_wcsicmp(v, L"push") || !_wcsicmp(v, L"pull") || !_wcsicmp(v, L"fetch") || !_wcsicmp(v, L"ls-remote"))
+                    idleMs = 10000;
+            }
+            GitResult r = RunGit(c.argv, repo, 1800 * 1000, idleMs);
             if (!r.out.empty()) {
                 for (auto& ln : SplitLines(r.out)) {
                     if (Trim(ln).empty()) continue;
@@ -2623,7 +2639,7 @@ static void OpClone() {
     if (fs::exists(target, ec)) { Warn(g_main, L"目标目录已存在:\n" + target.wstring()); return; }
     OutSep(); OutCmd(L"git clone " + *url); OutTxt(L"克隆中，请稍候…");
     g_busy = true;
-    GitResult r = RunGit(G({ L"clone", *url, target.wstring() }), *parentDir, 600000);
+    GitResult r = RunGit(G({ L"clone", *url, target.wstring() }), *parentDir, 600000, 10000);   // 远端操作：10 秒无响应即终止
     for (auto& ln : SplitLines(r.out)) if (!Trim(ln).empty()) OutTxt(ln);
     if (r.rc != 0 || !fs::exists(target / L".git", ec)) {
         OutErr(L"克隆失败，请检查地址/账号/网络");
