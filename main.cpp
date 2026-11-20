@@ -173,7 +173,7 @@ static WNDPROC g_dirEditProc = nullptr, g_cmdEditProc = nullptr;
 static double g_scale = 1.0;
 
 static std::wstring g_git, g_repo, g_remote, g_statUrl;
-static std::wstring g_repoTag;            // 标题栏版本：当前仓库的 git 标签原文（区分大小写，HEAD 无精确标签时就近取）
+static std::wstring g_repoTag;            // 工具仓库 HEAD 精确标签（仅开发机有值；无则版本识别走标记/内置）
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
 static int g_flowBlock = -1;              // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；-1=流程完成。④远端+首推为可选环节，不产生卡点）
@@ -346,20 +346,15 @@ static std::wstring GitOut(const std::vector<std::wstring>& args, DWORD timeoutM
     GitResult r = RunGit(argv, L"", timeoutMs);
     return r.rc == 0 ? r.out : L"";
 }
-// 工具自身代码仓库的标签原文（exe 所在目录即工具代码仓库）：HEAD 精确标签优先，没有时就近标签兜底，无标签返回空
+// 工具自身代码仓库的 HEAD 精确标签（exe 所在目录即工具代码仓库）；无精确标签返回空，
+// 版本识别交由升级标记/内置版本兜底（非精确 describe 串带 -N-g 后缀，参与比较反而会误判）
 static std::wstring GetToolRepoTag() {
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    std::vector<std::wstring> base = { g_git, L"-C", fs::path(exePath).parent_path().wstring(), L"describe", L"--tags" };
-    std::vector<std::wstring> exact = base; exact.push_back(L"--exact-match");
-    GitResult r = RunGit(exact, L"", 10000);
-    std::wstring t = Trim(r.rc == 0 ? r.out : L"");
-    if (t.empty()) {
-        std::vector<std::wstring> fallback = base; fallback.push_back(L"--abbrev=0");   // 只输出就近标签名（不带 -N-gxxxx 后缀）
-        r = RunGit(fallback, L"", 10000);
-        t = Trim(r.rc == 0 ? r.out : L"");
-    }
-    return t;
+    std::vector<std::wstring> cmd = { g_git, L"-C", fs::path(exePath).parent_path().wstring(),
+                                      L"describe", L"--tags", L"--exact-match" };
+    GitResult r = RunGit(cmd, L"", 10000);
+    return Trim(r.rc == 0 ? r.out : L"");
 }
 // ============================ 检查更新（GitHub Release）======================
 // WinINet 同步 GET（只在后台线程调用）；proxy=true 走系统代理，false 直连；失败返回空串
@@ -1323,9 +1318,11 @@ struct UpdateResult {
 static HWND g_hAboutDlg = nullptr;          // 关于弹窗（开着时检查结果写回弹窗）
 static std::atomic<bool> g_updateRunning{ false };
 static bool g_updateNagged = false;         // 自动检测的新版提示每会话只弹一次
-// 当前显示的版本（关于弹窗口径）：升级标记 > 仓库标签 > 内置版本号
-// 换身升级只替换 exe，本地仓库标签不变；升级成功时写标记文件记录已到的版本，避免升级后再误报新版本
+// 当前显示的版本：HEAD 精确仓库标签 > 升级标记 > 内置版本号
+// - 开发机：HEAD 打了 tag 即以仓库标签为准（比升级标记新，打 tag 后重编译立即生效）
+// - 对外用户：目录无仓库取不到仓库标签，回退升级标记/构建时注入的 APP_VERSION
 static std::wstring CurAppVersion() {
+    if (!g_repoTag.empty()) return g_repoTag;
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     std::wifstream f(fs::path(exePath).parent_path() / L"GitMenuTool.ver");
@@ -1335,7 +1332,7 @@ static std::wstring CurAppVersion() {
         t = Trim(t);
         if (!t.empty()) return t;
     }
-    return g_repoTag.empty() ? std::wstring(APP_VERSION) : g_repoTag;
+    return std::wstring(APP_VERSION);
 }
 /**
   ******************************************************************************
@@ -3391,7 +3388,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     LoadLibraryW(L"Riched20.dll");   // RichEdit 控件库（RICHEDIT_CLASS）
     g_git = FindExe(L"git");
     if (g_git.empty()) { MessageBoxW(nullptr, L"未检测到 Git，请先安装 Git for Windows。", APP_TITLE, MB_ICONERROR); return 1; }
-    g_repoTag = GetToolRepoTag();   // 标题栏版本：取工具自身代码仓库的 git 标签原文，无标签回退 APP_VERSION
+    g_repoTag = GetToolRepoTag();   // 工具仓库 HEAD 精确标签（无则空，版本识别走标记/APP_VERSION）
     g_scale = GetDeviceCaps(GetDC(nullptr), LOGPIXELSX) / 96.0;
     g_fontUI = MkFont(10, false, L"Microsoft YaHei UI");
     g_fontUIBold = MkFont(10, true, L"Microsoft YaHei UI");
