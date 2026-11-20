@@ -177,6 +177,7 @@ static double g_scale = 1.0;
 
 static std::wstring g_git, g_repo, g_remote, g_statUrl;
 static int g_statLineCnt = 0;             // 状态卡当前行数（渲染时更新，Layout 按它自适应高度）
+static std::wstring g_statLastText;       // 状态卡上次渲染的纯文本（内容没变则跳过重建，防抖）
 static std::atomic<bool> g_busy{ false };
 static std::atomic<bool> g_statusRunning{ false };
 static std::atomic<int> g_flowBlock{ -1 };  // 流程卡卡点（0=①全局配置 1=②初始化 2=③ignore：左侧栏整体置灰禁点；-1=流程完成。④远端+首推为可选环节，不产生卡点）。状态 worker 线程写、UI 线程读，用原子量
@@ -3561,16 +3562,21 @@ static void Layout() {
 // 状态卡渲染
 static void RenderStatus(std::vector<std::vector<Seg>>* lines) {
     g_statLineCnt = (int)lines->size();
+    std::wstring all;                                    // 纯文本比对：内容没变就不重建（每 4 秒刷新完全静止）
+    for (auto& ln : *lines) for (auto& s : ln) all += s.text;
+    if (all == g_statLastText) { delete lines; return; }
+    g_statLastText = all;
     int needH = g_statLineCnt * (int)(22 * g_scale) + (int)(16 * g_scale);
-    RECT crc; GetClientRect(g_stat, &crc);
-    bool resize = crc.bottom != needH;
-    SendMessageW(g_stat, WM_SETREDRAW, FALSE, 0);   // 关重绘：清空+逐行追加过程不闪
+    static int s_lastNeed = -1;
+    bool resize = needH != s_lastNeed;                   // 与上次需要的卡高比较（客户区含边框，不能直接比）
+    s_lastNeed = needH;
+    SendMessageW(g_stat, WM_SETREDRAW, FALSE, 0);        // 关重绘：清空+逐行追加过程不闪
     SetWindowTextW(g_stat, L"");
     for (auto& ln : *lines) RichAppendLine(g_stat, ln);
     SendMessageW(g_stat, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(g_stat, nullptr, FALSE);
     delete lines;
-    if (resize) Layout();   // 行数变化才重排布局，避免每次刷新整列抖动
+    if (resize) Layout();   // 行数变化才重排布局
 }
 
 // ============================ 主窗口过程 ====================================
