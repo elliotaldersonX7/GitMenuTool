@@ -2376,42 +2376,170 @@ static void OpInitRepo() {
     std::vector<JobCmd> v; v.push_back({ { L"SPECIAL", L"init" }, false });
     ExecAsync(std::move(v));
 }
-// 配置远程：新增远端或修改现有远端地址（不推送；推送走【推送(commit)】，其中含首次推送的 -u 与无关历史询问）
-static void OpRemoteAdd() {
-    if (!EnsureRepo()) return;
-    std::vector<std::wstring> rems;
-    for (auto& l : SplitLines(GitOut({ L"remote" }))) { std::wstring t = Trim(l); if (!t.empty()) rems.push_back(t); }
-    std::wstring rn;
-    if (rems.size() > 1) {
-        // 多远端才需要先选名字；单远端直接改、无远端直接加（在地址输入后判定）
-        std::wstring hint;
-        for (auto& r : rems) { if (!hint.empty()) hint += L", "; hint += r; }
-        auto pick = AskText(g_main, L"配置远程", Fmt(L"已存在多个远端(%s)。\n要修改的远端名（留空=新增远端）:", hint.c_str()), g_remote);
-        if (!pick) return;
-        if (!pick->empty()) {
-            bool found = false;
-            for (auto& r : rems) if (r == *pick) { found = true; break; }
-            if (!found) { Warn(g_main, Fmt(L"远端 %s 不存在（现有: %s）", pick->c_str(), hint.c_str())); return; }
-            rn = *pick;
+// ============================ 配置远程（多远端管理弹窗） =====================
+// 现有远端以勾选行显示（勾选=保留，去勾选=OK 时删除）；【＋添加远端】动态追加
+// "本地名 + 链接" 新行，弹窗 Y 轴随内容自适应；界面软上限 10 个（git 本身无硬限制）
+struct RemoteRow {
+    std::wstring name, url;
+    bool existing = false, checked = true;
+    HWND hChk = nullptr, hName = nullptr, hUrl = nullptr;
+};
+struct RemoteCfgState {
+    std::vector<RemoteRow> rows;
+    HWND hDlg = nullptr, hAdd = nullptr, hOk = nullptr, hCancel = nullptr;
+    int addY = 0, ch = 0;
+    bool done = false;
+};
+static const int REMOTE_UI_MAX = 10;   // 弹窗界面软上限（git 支持任意多个，超了用底部命令行）
+static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
+    RemoteCfgState* st = (RemoteCfgState*)data;
+    int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
+    int gap = (int)(6 * g_scale), addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
+    int wd = (int)(520 * g_scale), nameW = (int)(150 * g_scale);
+    switch (msg) {
+    case WM_COMMAND: {
+        int id = LOWORD(w), code = HIWORD(w);
+        if (id == 290 && code == BN_CLICKED) {           // ＋添加远端：动态追加一行并加高弹窗
+            if ((int)st->rows.size() >= REMOTE_UI_MAX) {
+                Warn(h, Fmt(L"界面最多管理 %d 个远端（git 本身无限制，更多可用底部命令行）。", REMOTE_UI_MAX));
+                return 0;
+            }
+            int n = (int)st->rows.size();
+            RemoteRow r;
+            r.hChk = CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                mg, st->addY, (int)(22 * g_scale), rowEditH, h, (HMENU)(INT_PTR)(400 + n), g_hInst, nullptr);
+            SendMessageW(r.hChk, BM_SETCHECK, BST_CHECKED, 0);
+            r.hName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                mg + (int)(26 * g_scale), st->addY, nameW, rowEditH, h, (HMENU)(INT_PTR)(500 + n), g_hInst, nullptr);
+            r.hUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                mg + (int)(26 * g_scale) + nameW + (int)(6 * g_scale), st->addY,
+                wd - 2 * mg - (int)(26 * g_scale) - nameW - (int)(6 * g_scale), rowEditH, h, (HMENU)(INT_PTR)(600 + n), g_hInst, nullptr);
+            SendMessageW(r.hChk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+            SendMessageW(r.hName, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+            SendMessageW(r.hUrl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+            st->rows.push_back(std::move(r));
+            st->ch += rowEditH + gap;
+            st->addY += rowEditH + gap;
+            RECT fr; GetWindowRect(h, &fr);
+            SetWindowPos(h, nullptr, 0, 0, fr.right - fr.left, fr.bottom - fr.top + rowEditH + gap,
+                         SWP_NOMOVE | SWP_NOZORDER);
+            MoveWindow(st->hAdd, mg, st->addY, (int)(110 * g_scale), addH, TRUE);
+            int by = st->addY + addH + (int)(12 * g_scale);
+            MoveWindow(st->hOk, wd - 2 * (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, TRUE);
+            MoveWindow(st->hCancel, wd - (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, TRUE);
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
         }
+        if (id == IDOK || id == IDCANCEL) {
+            if (id == IDOK) {
+                for (auto& r : st->rows) {
+                    if (r.hChk) r.checked = SendMessageW(r.hChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                    auto readEdit = [&](HWND he, std::wstring& out) {
+                        if (!he) return;
+                        int len = GetWindowTextLengthW(he);
+                        std::wstring s(len, L'\0');
+                        GetWindowTextW(he, &s[0], len + 1);
+                        out = Trim(s);
+                    };
+                    readEdit(r.hName, r.name);
+                    readEdit(r.hUrl, r.url);
+                }
+                // 校验：勾选的新行必须 本地名+链接 都填，且名字不与现有/其它新行重名
+                std::vector<std::wstring> names;
+                for (auto& r : st->rows) if (r.existing) names.push_back(r.name);
+                bool bad = false;
+                for (auto& r : st->rows) {
+                    if (!r.existing && r.checked) {
+                        if (r.name.empty() || r.url.empty()) { Warn(h, L"新增远端需要填写 本地名 和 链接（或取消勾选该行）。"); bad = true; break; }
+                        if (std::find(names.begin(), names.end(), r.name) != names.end()) {
+                            Warn(h, Fmt(L"本地名 [%s] 与现有远端重名，请换一个。", r.name.c_str())); bad = true; break;
+                        }
+                        names.push_back(r.name);
+                    }
+                }
+                if (bad) return 0;   // 校验不过：弹窗保持打开
+            }
+            st->done = true;
+            DestroyWindow(h);
+        }
+        return 0;
     }
-    // 地址默认值：已配远端时预填当前地址，未配置远端则为空
-    std::wstring curRemote = rn.empty() ? g_remote : rn;
-    std::wstring urlDef = curRemote.empty() ? L"" : Trim(GitOut({ L"config", L"--get", L"remote." + curRemote + L".url" }));
-    auto url = AskText(g_main, L"配置远程", L"远程仓库地址:", urlDef);
-    if (!url || url->empty()) return;
-    if (rn.empty() && rems.size() == 1) rn = rems[0];   // 单远端：直接修改其地址
+    case WM_CLOSE:
+        st->done = true;
+        DestroyWindow(h);
+        return 0;
+    }
+    return DefSubclassProc(h, msg, w, l);
+}
+// 配置远程弹窗：现有远端勾选行 + ＋添加远端动态行；返回 rows 供调用方统一生成命令
+static std::vector<RemoteRow> AskRemoteCfg(HWND parent) {
+    int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), gap = (int)(6 * g_scale);
+    int addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
+    int w = (int)(520 * g_scale);
+    RemoteCfgState st;
+    for (auto& l : SplitLines(GitOut({ L"remote" }))) {
+        std::wstring nm = Trim(l);
+        if (nm.empty()) continue;
+        std::wstring url = Trim(GitOut({ L"config", L"--get", L"remote." + nm + L".url" }));
+        st.rows.push_back({ nm, url, true, true, nullptr, nullptr, nullptr });
+    }
+    int nExist = (int)st.rows.size();
+    st.addY = mg + nExist * (rowChkH + gap);
+    st.ch = st.addY + addH + (int)(12 * g_scale) + btnH + mg;
+    RECT rcFrame = { 0, 0, w, st.ch };
+    AdjustWindowRectEx(&rcFrame, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    int ww = rcFrame.right - rcFrame.left, wh = rcFrame.bottom - rcFrame.top;
+    RECT pr; GetWindowRect(parent, &pr);
+    int x = pr.left + ((pr.right - pr.left) - ww) / 2, y = pr.top + ((pr.bottom - pr.top) - wh) / 2;
+    if (x < 0) x = 0; if (y < 0) y = 0;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"#32770", L"配置远程",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, parent, nullptr, g_hInst, nullptr);
+    st.hDlg = dlg;
+    SetWindowSubclass(dlg, RemoteCfgDlgSub, 1, (DWORD_PTR)&st);
+    int yy = mg;
+    for (size_t i = 0; i < st.rows.size(); ++i) {
+        RemoteRow& r = st.rows[i];
+        std::wstring label = r.name + L" → " + (r.url.empty() ? L"（未取到链接）" : r.url);
+        r.hChk = CreateWindowExW(0, L"BUTTON", label.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            mg, yy, w - 2 * mg, rowChkH, dlg, (HMENU)(INT_PTR)(400 + (int)i), g_hInst, nullptr);
+        SendMessageW(r.hChk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+        yy += rowChkH + gap;
+    }
+    st.hAdd = CreateWindowExW(0, L"BUTTON", L"＋ 添加远端", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        mg, st.addY, (int)(110 * g_scale), addH, dlg, (HMENU)290, g_hInst, nullptr);
+    int by = st.addY + addH + (int)(12 * g_scale);
+    st.hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        w - 2 * (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
+    st.hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        w - (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
+    for (HWND c : { st.hAdd, st.hOk, st.hCancel })
+        SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    EnableWindow(parent, FALSE);
+    ShowWindow(dlg, SW_SHOW);
+    SetFocus(nExist ? st.rows[0].hChk : st.hAdd);
+    MSG msg;
+    while (!st.done && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (IsDialogMessageW(dlg, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    EnableWindow(parent, TRUE);
+    SetActiveWindow(parent);
+    return st.rows;
+}
+// 配置远程：OK 后统一生成命令——去勾选的现有远端删除，勾选的新行 remote add
+static void OpRemoteCfg() {
+    auto rows = AskRemoteCfg(g_main);
     std::vector<std::vector<std::wstring>> cmds;
-    if (!rn.empty()) {
-        cmds.push_back(G({ L"remote", L"set-url", rn, *url }));
-    } else {
-        rn = RemoteFromUrl(*url);
-        for (auto& r : rems) if (r == rn) { Warn(g_main, Fmt(L"从地址推断的远端名 %s 已存在，请先改名现有远端或换地址。", rn.c_str())); return; }
-        cmds.push_back(G({ L"remote", L"add", rn, *url }));
-        g_remote = rn;
+    for (auto& r : rows) {
+        if (r.existing && !r.checked)
+            cmds.push_back(G({ L"remote", L"remove", r.name }));
+        else if (!r.existing && r.checked && !r.name.empty() && !r.url.empty())
+            cmds.push_back(G({ L"remote", L"add", r.name, r.url }));
     }
-    cmds.push_back(G({ L"remote", L"-v" }));
-    ExecV(cmds);
+    if (cmds.empty()) return;
+    ExecV(std::move(cmds));
+    RefreshStatusAsync();   // 默认远端可能变化（被删/新增），立即刷新
 }
 static void OpRemoteRename() {
     if (!EnsureRepo() || NeedRemote()) return;
@@ -3026,7 +3154,7 @@ struct MenuItem { int id; const wchar_t* name; void (*fn)(); };
 struct MenuCat  { const wchar_t* title; std::vector<MenuItem> items; };
 static const MenuCat MENU[] = {
     { L"远端", {
-        { IDM_REMOTE_ADD,    L"配置远程",         OpRemoteAdd },
+        { IDM_REMOTE_ADD,    L"配置远程",         OpRemoteCfg },
         { IDM_REMOTE_RENAME, L"远端改名(本地别名)", OpRemoteRename },
     } },
     // 克隆仓库已移到顶栏（IDM_CLONE 显式分发），左侧不再显示
