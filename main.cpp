@@ -1992,7 +1992,7 @@ static std::wstring LoadLastDir() {
 }
 
 // ============================ 状态卡 ========================================
-static void RefreshStatusAsync();   // 前向声明：FetchTagDiffAsync 刷新缓存后触发重渲
+static void RefreshStatusAsync(bool force = false);   // 前向声明：FetchTagDiffAsync 刷新缓存后触发重渲
 // 标签与远端的领先/落后（按 tag 名集合比较，与 commit 的 ahead/behind 同语义）
 // ls-remote 走网络：异步刷新缓存（30 秒 TTL），渲染只读缓存即时完成，状态卡不因网络卡顿
 struct TagDiff {
@@ -2007,43 +2007,47 @@ static std::vector<std::wstring> cacheRemote;
 static bool cacheOk = false, cacheHas = false;   // cacheOk=最近一次网络是否成功；cacheHas=本 key 已拉取过（失败也记，30 秒后再试）
 static std::atomic<bool> g_tagFetching{ false };
 static std::chrono::steady_clock::time_point NowT() { return std::chrono::steady_clock::now(); }
+// 同步拉取远端标签并更新缓存（走 15 秒超时/10 秒无响应看门狗）
+static void FetchTagDiffSync() {
+    std::vector<std::wstring> rem;
+    bool ok = false;
+    if (!g_remote.empty()) {
+        GitResult r = RunGit({ g_git, L"-C", g_repo, L"ls-remote", L"--tags", g_remote }, L"", 15000, 10000);
+        ok = (r.rc == 0);
+        if (ok) {
+            for (auto& l : SplitLines(r.out)) {
+                size_t tab = l.find(L'\t');
+                if (tab == std::wstring::npos) continue;
+                std::wstring ref = Trim(l.substr(tab + 1));
+                const std::wstring pre = L"refs/tags/";
+                if (ref.rfind(pre, 0) != 0) continue;
+                std::wstring name = ref.substr(pre.size());
+                if (name.size() >= 3 && name.compare(name.size() - 3, 3, L"^{}") == 0) continue;  // 注解标签的解引用行去重
+                if (!name.empty()) rem.push_back(name);
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_tagMtx);
+        cacheRemote = std::move(rem);
+        cacheOk = ok;
+        cacheHas = true;            // 失败也记：30 秒 TTL 内不反复打网络
+        cacheKey = g_repo + L"|" + g_remote;
+        cacheAt = NowT();
+    }
+}
 // 后台拉取远端标签刷新缓存；完成后触发一次状态重渲（渲染走缓存即时完成）
 static void FetchTagDiffAsync() {
     bool expected = false;
     if (!g_tagFetching.compare_exchange_strong(expected, true)) return;
     std::thread([]() {
-        std::vector<std::wstring> rem;
-        bool ok = false;
-        if (!g_remote.empty()) {
-            GitResult r = RunGit({ g_git, L"-C", g_repo, L"ls-remote", L"--tags", g_remote }, L"", 15000, 10000);
-            ok = (r.rc == 0);
-            if (ok) {
-                for (auto& l : SplitLines(r.out)) {
-                    size_t tab = l.find(L'\t');
-                    if (tab == std::wstring::npos) continue;
-                    std::wstring ref = Trim(l.substr(tab + 1));
-                    const std::wstring pre = L"refs/tags/";
-                    if (ref.rfind(pre, 0) != 0) continue;
-                    std::wstring name = ref.substr(pre.size());
-                    if (name.size() >= 3 && name.compare(name.size() - 3, 3, L"^{}") == 0) continue;  // 注解标签的解引用行去重
-                    if (!name.empty()) rem.push_back(name);
-                }
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lk(g_tagMtx);
-            cacheRemote = std::move(rem);
-            cacheOk = ok;
-            cacheHas = true;            // 失败也记：30 秒 TTL 内不反复打网络
-            cacheKey = g_repo + L"|" + g_remote;
-            cacheAt = NowT();
-        }
+        FetchTagDiffSync();
         g_tagFetching = false;
         RefreshStatusAsync();           // 缓存已刷新：重渲一次（即时）
     }).detach();
 }
-// 标签差异：渲染线程只读缓存（不碰网络）；缓存过期时后台补拉
-static TagDiff ComputeTagDiff() {
+// 标签差异：force=true（手动刷新）同步等网络拿完整数据；false（自动刷新）只读缓存即时渲染，过期后台补拉
+static TagDiff ComputeTagDiff(bool force) {
     TagDiff d;
     std::wstring localTags = GitOut({ L"tag", L"-l" });
     std::vector<std::wstring> ltags;
@@ -2055,26 +2059,31 @@ static TagDiff ComputeTagDiff() {
         return best;
     };
     d.localLatest = latestOf(ltags);
-    std::wstring key = g_repo + L"|" + g_remote;
-    bool stale = false;
-    {
+    auto fillFromCache = [&]() {
         std::lock_guard<std::mutex> lk(g_tagMtx);
         d.netOk = cacheOk;
         d.remoteCnt = (int)cacheRemote.size();
         d.remoteLatest = latestOf(cacheRemote);
+        d.localOnly = 0; d.remoteOnly = 0;
         for (auto& t : ltags)
             if (std::find(cacheRemote.begin(), cacheRemote.end(), t) == cacheRemote.end()) ++d.localOnly;
         for (auto& t : cacheRemote)
             if (std::find(ltags.begin(), ltags.end(), t) == ltags.end()) ++d.remoteOnly;
-        stale = !(cacheHas && key == cacheKey &&
+    };
+    bool stale = false;
+    {
+        std::lock_guard<std::mutex> lk(g_tagMtx);
+        stale = !(cacheHas && g_repo + L"|" + g_remote == cacheKey &&
                   std::chrono::duration_cast<std::chrono::seconds>(NowT() - cacheAt).count() < 30);
     }
-    if (stale) FetchTagDiffAsync();    // 过期后台补拉，不阻塞渲染
+    if (force) FetchTagDiffSync();             // 手动刷新：同步等数据齐，卡片一次渲染完整
+    else if (stale) FetchTagDiffAsync();       // 自动刷新：后台补拉，本次先用缓存
+    fillFromCache();
     return d;
 }
-static void RefreshStatusAsync();
+static void RefreshStatusAsync(bool force);
 // 状态 worker：探测仓库状态，构建状态卡富文本（含流程卡/分支/上游/改动/远端）
-static std::vector<std::vector<Seg>>* BuildStatusSegs() {
+static std::vector<std::vector<Seg>>* BuildStatusSegs(bool force = false) {
     auto* lines = new std::vector<std::vector<Seg>>;
     if (g_repo.empty()) {
         lines->push_back({ SegT(L"（未选定仓库目录，请先在顶部选定并打开）", STAT_RED) });
@@ -2161,28 +2170,38 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     lines->push_back(flow);
     // 分支行
     lines->push_back({ SegT(L"分支：", STAT_TXT, true), SegT(L" " + branch + L" ", STAT_BLU, true, BG_BLU) });
-    // 未提交行（工作区）：有（数量）/无0
+    // 未提交行（工作区）：纯数字，0 绿色、大于 0 橙色
     int nTotal = 0;
     for (size_t i2 = 1; i2 < sl.size(); ++i2) if (!sl[i2].empty()) ++nTotal;
     if (nTotal > 0)
-        lines->push_back({ SegT(L"未提交：", STAT_TXT, true), SegT(L" 有（" + std::to_wstring(nTotal) + L"） ", STAT_ORG, false, BG_YLW) });
+        lines->push_back({ SegT(L"未提交：", STAT_TXT, true), SegT(L" " + std::to_wstring(nTotal) + L" ", STAT_ORG, false, BG_YLW) });
     else
-        lines->push_back({ SegT(L"未提交：", STAT_TXT, true), SegT(L" 无0 ", STAT_GRN, false, BG_GRN) });
-    // 本地commit VS 远端commit：领先（数量）/落后（数量）
+        lines->push_back({ SegT(L"未提交：", STAT_TXT, true), SegT(L" 0 ", STAT_GRN, false, BG_GRN) });
+    // 本地commit VS 远端commit：只显示非零方向（领先/落后不同时出现，真分叉才并列）
     std::vector<Seg> cm = { SegT(L"本地commit VS 远端commit：", STAT_TXT, true) };
     if (!upstream.empty()) {
-        cm.push_back(SegT(L" 领先（" + std::to_wstring(ahead) + L"） ", STAT_BLU, true, BG_BLU));
-        cm.push_back(SegT(L" / 落后（" + std::to_wstring(behind) + L"） ", behind > 0 ? STAT_BLU : STAT_DIM, true, BG_BLU));
+        if (ahead > 0 && behind > 0) {
+            cm.push_back(SegT(L" 领先（" + std::to_wstring(ahead) + L"） ", STAT_BLU, true, BG_BLU));
+            cm.push_back(SegT(L" / 落后（" + std::to_wstring(behind) + L"） ", STAT_BLU, true, BG_BLU));
+        } else if (ahead > 0) {
+            cm.push_back(SegT(L" 领先（" + std::to_wstring(ahead) + L"） ", STAT_BLU, true, BG_BLU));
+        } else if (behind > 0) {
+            cm.push_back(SegT(L" 落后（" + std::to_wstring(behind) + L"） ", STAT_BLU, true, BG_BLU));
+        } else {
+            cm.push_back(SegT(L" 0 ", STAT_GRN, false, BG_GRN));
+        }
     } else {
         cm.push_back(SegT(L"无上游跟踪", STAT_DIM));
     }
     lines->push_back(cm);
     // 本地tag VS 远端tag：本地最新：xxx 远端最新：xxx
-    TagDiff td = ComputeTagDiff();
+    TagDiff td = ComputeTagDiff(force);
     std::vector<Seg> tg = { SegT(L"本地tag VS 远端tag：", STAT_TXT, true) };
     tg.push_back(SegT(L" 本地最新：" + (td.localLatest.empty() ? std::wstring(L"（无）") : td.localLatest) + L" ",
                       STAT_BLU, true, BG_BLU));
-    if (td.netOk)
+    if (g_remote.empty())
+        tg.push_back(SegT(L" 远端最新：（未配置远端）", STAT_DIM));
+    else if (td.netOk)
         tg.push_back(SegT(L" 远端最新：" + (td.remoteLatest.empty() ? std::wstring(L"（无）") : td.remoteLatest) + L" ",
                           td.remoteLatest == td.localLatest ? STAT_DIM : STAT_BLU, true, BG_BLU));
     else
@@ -2204,11 +2223,11 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     }
     return lines;
 }
-static void RefreshStatusAsync() {
+static void RefreshStatusAsync(bool force) {
     bool expected = false;
     if (!g_statusRunning.compare_exchange_strong(expected, true)) return;
-    std::thread([]() {
-        auto* segs = BuildStatusSegs();
+    std::thread([force]() {
+        auto* segs = BuildStatusSegs(force);
         PostMessageW(g_main, WM_APP_STATUS, (WPARAM)segs, 0);
     }).detach();
 }
@@ -3595,7 +3614,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         if (id == IDC_CMDRUN) { RunCmdLine(); return 0; }
-        if (id == IDC_REFRESH) { RefreshStatusAsync(); return 0; }
+        if (id == IDC_REFRESH) { RefreshStatusAsync(true); return 0; }   // 手动刷新：同步刷新全部信息（含远端标签）
         if (id == IDC_GLOBALCFG) { OpGlobalCfg(); return 0; }
         if (id == IDC_INIT) { OpInitRepo(); return 0; }
         if (id == IDC_IGNORE) { OpIgnoreCfg(); return 0; }
