@@ -16,6 +16,8 @@ rem Version alignment: generate app_version.h from git describe (tag the HEAD co
 rem NOTE: keep this .bat ASCII-only, cmd parses it with the ANSI codepage.
 set "APPTAG="
 for /f "usebackq delims=" %%i in (`git -C "%~dp0." describe --tags 2^>nul`) do set "APPTAG=%%i"
+rem Strip the -N-ghash suffix: inject plain tag only (assume release tags contain no '-')
+if defined APPTAG for /f "delims=- tokens=1" %%j in ("%APPTAG%") do set "APPTAG=%%j"
 if defined APPTAG (
     echo [OK] inject APP_VERSION_STR = %APPTAG%
     > "%~dp0app_version.h" echo #define APP_VERSION_STR L"%APPTAG%"
