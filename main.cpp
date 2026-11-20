@@ -1994,7 +1994,11 @@ static std::wstring LoadLastDir() {
 static void RefreshStatusAsync();   // 前向声明：FetchTagDiffAsync 刷新缓存后触发重渲
 // 标签与远端的领先/落后（按 tag 名集合比较，与 commit 的 ahead/behind 同语义）
 // ls-remote 走网络：异步刷新缓存（30 秒 TTL），渲染只读缓存即时完成，状态卡不因网络卡顿
-struct TagDiff { int localOnly = 0; int remoteOnly = 0; int localCnt = 0; int remoteCnt = 0; bool netOk = true; };
+struct TagDiff {
+    int localOnly = 0, remoteOnly = 0, localCnt = 0, remoteCnt = 0;
+    bool netOk = true;
+    std::wstring localLatest, remoteLatest;   // 本地/远端最新 tag（VersionCompare 取最大）
+};
 static std::mutex g_tagMtx;
 static std::wstring cacheKey;
 static std::chrono::steady_clock::time_point cacheAt;
@@ -2044,12 +2048,19 @@ static TagDiff ComputeTagDiff() {
     std::vector<std::wstring> ltags;
     for (auto& l : SplitLines(localTags)) { std::wstring t = Trim(l); if (!t.empty()) ltags.push_back(t); }
     d.localCnt = (int)ltags.size();
+    auto latestOf = [](const std::vector<std::wstring>& v) {
+        std::wstring best;
+        for (auto& t : v) if (best.empty() || VersionCompare(t, best) > 0) best = t;
+        return best;
+    };
+    d.localLatest = latestOf(ltags);
     std::wstring key = g_repo + L"|" + g_remote;
     bool stale = false;
     {
         std::lock_guard<std::mutex> lk(g_tagMtx);
         d.netOk = cacheOk;
         d.remoteCnt = (int)cacheRemote.size();
+        d.remoteLatest = latestOf(cacheRemote);
         for (auto& t : ltags)
             if (std::find(cacheRemote.begin(), cacheRemote.end(), t) == cacheRemote.end()) ++d.localOnly;
         for (auto& t : cacheRemote)
@@ -2149,47 +2160,32 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs() {
     lines->push_back(flow);
     // 分支行
     lines->push_back({ SegT(L"分支：", STAT_TXT, true), SegT(L" " + branch + L" ", STAT_BLU, true, BG_BLU) });
-    // 工作区行（有无未提交改动）：复用合并探测的 status 结果（首行 ## 头，其后为改动条目）
-    int nTotal = 0, nUntracked = 0;
-    for (size_t i2 = 1; i2 < sl.size(); ++i2) {
-        const std::wstring& l = sl[i2];
-        if (l.empty()) continue;
-        ++nTotal;
-        if (l.rfind(L"??", 0) == 0) ++nUntracked;
-    }
-    if (nTotal > 0) {
-        std::wstring dtxt = L"未提交改动 " + std::to_wstring(nTotal) + L" 处";
-        if (nUntracked) dtxt += L"（含未跟踪 " + std::to_wstring(nUntracked) + L"）";
-        lines->push_back({ SegT(L"工作区：", STAT_TXT, true), SegT(L" ⚠ " + dtxt + L" ", STAT_ORG, false, BG_YLW) });
-    } else {
-        lines->push_back({ SegT(L"工作区：", STAT_TXT, true), SegT(L" ✔ 干净（无未提交改动） ", STAT_GRN, false, BG_GRN) });
-    }
-    // ② 已提交（本地 vs 远端）：领先/落后取自 status 头的 [ahead/behind]，不再单独跑 rev-list
-    std::vector<Seg> cm = { SegT(L"已提交：", STAT_TXT, true) };
+    // 未提交行（工作区）：有（数量）/无0
+    int nTotal = 0;
+    for (size_t i2 = 1; i2 < sl.size(); ++i2) if (!sl[i2].empty()) ++nTotal;
+    if (nTotal > 0)
+        lines->push_back({ SegT(L"未提交：", STAT_TXT, true), SegT(L" 有（" + std::to_wstring(nTotal) + L"） ", STAT_ORG, false, BG_YLW) });
+    else
+        lines->push_back({ SegT(L"未提交：", STAT_TXT, true), SegT(L" 无0 ", STAT_GRN, false, BG_GRN) });
+    // 本地commit VS 远端commit：领先（数量）/落后（数量）
+    std::vector<Seg> cm = { SegT(L"本地commit VS 远端commit：", STAT_TXT, true) };
     if (!upstream.empty()) {
-        cm.push_back(SegT(L" 本地 ", STAT_TXT));
-        cm.push_back(ahead > 0 ? SegT(L" ↑" + std::to_wstring(ahead) + L" ", STAT_BLU, true, BG_BLU)
-                               : SegT(L" 0 ", STAT_DIM));
-        cm.push_back(SegT(L" / 远端 ", STAT_TXT));
-        cm.push_back(behind > 0 ? SegT(L" ↑" + std::to_wstring(behind) + L" ", STAT_BLU, true, BG_BLU)
-                                : SegT(L" 0 ", STAT_DIM));
+        cm.push_back(SegT(L" 领先（" + std::to_wstring(ahead) + L"） ", STAT_BLU, true, BG_BLU));
+        cm.push_back(SegT(L" / 落后（" + std::to_wstring(behind) + L"） ", behind > 0 ? STAT_BLU : STAT_DIM, true, BG_BLU));
     } else {
         cm.push_back(SegT(L"无上游跟踪", STAT_DIM));
     }
     lines->push_back(cm);
-    // ③ 标签（同"已提交"的双向对比）
+    // 本地tag VS 远端tag：本地最新：xxx 远端最新：xxx
     TagDiff td = ComputeTagDiff();
-    std::vector<Seg> tg = { SegT(L"标签：", STAT_TXT, true) };
-    if (td.netOk || td.remoteCnt > 0) {
-        tg.push_back(SegT(L" 本地 ", STAT_TXT));
-        tg.push_back(td.localOnly > 0 ? SegT(L" ↑" + std::to_wstring(td.localOnly) + L" ", STAT_BLU, true, BG_BLU)
-                                      : SegT(L" 0 ", STAT_DIM));
-        tg.push_back(SegT(L" / 远端 ", STAT_TXT));
-        tg.push_back(td.remoteOnly > 0 ? SegT(L" ↑" + std::to_wstring(td.remoteOnly) + L" ", STAT_BLU, true, BG_BLU)
-                                       : SegT(L" 0 ", STAT_DIM));
-    } else {
-        tg.push_back(SegT(L"远端标签未知（网络不可达，可配置代理）", STAT_DIM));
-    }
+    std::vector<Seg> tg = { SegT(L"本地tag VS 远端tag：", STAT_TXT, true) };
+    tg.push_back(SegT(L" 本地最新：" + (td.localLatest.empty() ? std::wstring(L"（无）") : td.localLatest) + L" ",
+                      STAT_BLU, true, BG_BLU));
+    if (td.netOk)
+        tg.push_back(SegT(L" 远端最新：" + (td.remoteLatest.empty() ? std::wstring(L"（无）") : td.remoteLatest) + L" ",
+                          td.remoteLatest == td.localLatest ? STAT_DIM : STAT_BLU, true, BG_BLU));
+    else
+        tg.push_back(SegT(L" 远端最新：未知（网络不可达，可配置代理）", STAT_DIM));
     lines->push_back(tg);
     // 远端两行
     if (!g_remote.empty()) {
