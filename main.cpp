@@ -2701,6 +2701,15 @@ static LRESULT CALLBACK ProxyDlgSub(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR
         }
         return 0;
     }
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = (HDC)w;
+        if ((HWND)l == st->hDetect) {                     // 检测结果行：底色取弹窗实际擦底画刷（避免白底）
+            SetTextColor(dc, RGB(0x44, 0x44, 0x44));
+            SetBkMode(dc, TRANSPARENT);
+            return (LRESULT)SendMessageW(h, WM_CTLCOLORDLG, (WPARAM)dc, (LPARAM)h);
+        }
+        break;
+    }
     case WM_CLOSE:
         st->done = true; st->result = std::nullopt;
         DestroyWindow(h);
@@ -2732,10 +2741,10 @@ static std::optional<std::wstring> AskProxy(HWND parent, bool on,
     st.hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", addr.c_str(),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, m, m + chkH + (int)(8 * g_scale) + lblH, w - 2 * m, editH,
         dlg, (HMENU)101, g_hInst, nullptr);
-    st.hDetect = CreateWindowExW(0, L"STATIC",
-        (detected.empty() ? L"检测结果：未检测到系统代理/环境变量，可手动填写" : L"检测结果：系统代理 " + detected).c_str(),
-        WS_CHILD | WS_VISIBLE, m, m + chkH + (int)(8 * g_scale) + lblH + editH + (int)(10 * g_scale), w - 2 * m, tipH,
-        dlg, nullptr, g_hInst, nullptr);
+    st.hDetect = CreateWindowExW(0, L"EDIT",
+        (detected.empty() ? L"未检测到本地代理，可手动填写" : L"检测到本地代理：" + detected).c_str(),
+        WS_CHILD | WS_VISIBLE | ES_READONLY | ES_AUTOHSCROLL, m, m + chkH + (int)(8 * g_scale) + lblH + editH + (int)(10 * g_scale), w - 2 * m, tipH,
+        dlg, nullptr, g_hInst, nullptr);   // 只读编辑框：检测结果可拖选复制
     HWND hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
         w - 2 * (int)(80 * g_scale) - m, ch - m - btnH, (int)(80 * g_scale), btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
     HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
