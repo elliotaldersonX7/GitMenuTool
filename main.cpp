@@ -2672,32 +2672,28 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                     readEdit(r.hUrl, r.url);
                     if (r.checked && !r.del) st->defaultPick = r.name;   // 勾选的行（现有/新增均可）= 默认远端
                 }
-                // 校验：别名非空且不重名（现有行改名/新行）；新行还须链接非空
+                // 校验：别名非空且不重名（现有行改名/新行一律与其它行查重，排除自己）；新行还须链接非空
                 bool bad = false;
                 for (auto& r : st->rows) {
                     if (r.del) continue;
-                    const std::wstring& effName = r.existing ? r.name0 : std::wstring();   // 该行占用的旧名
                     if (r.existing) {
                         if (r.name.empty()) { Warn(h, Fmt(L"远端 [%s] 的本地别名不能为空。", r.name0.c_str())); bad = true; break; }
-                        if (r.name != r.name0) {   // 改了名：与其它行占用的名字查重
-                            for (auto& o : st->rows) {
-                                if (&o == &r || o.del) continue;
-                                const std::wstring& on = o.existing ? o.name0 : o.name;
-                                if (!on.empty() && on == r.name) {
-                                    Warn(h, Fmt(L"本地别名 [%s] 与其它远端重名。", r.name.c_str()));
-                                    bad = true; break;
-                                }
-                            }
-                            if (bad) break;
-                        }
                     } else {
                         if (r.name.empty() && r.url.empty()) {
                             if (r.checked) { Warn(h, L"勾选为默认远端的行需要填写 本地名 和 链接。"); bad = true; break; }
                             continue;   // 空草稿行：忽略不生成命令
                         }
                         if (r.name.empty() || r.url.empty()) { Warn(h, L"新增远端需要填写 本地名 和 链接（或点该行 ✕ 移除）。"); bad = true; break; }
-                        if (r.name == st->defaultPick) { Warn(h, Fmt(L"本地名 [%s] 与保留的默认远端重名，请换一个。", r.name.c_str())); bad = true; break; }
                     }
+                    if (r.name.empty()) continue;
+                    for (auto& o : st->rows) {   // 与其它行占用的名字查重（排除自己：勾选草稿为默认时 defaultPick 就是自己的名字）
+                        if (&o == &r || o.del) continue;
+                        if (!o.name.empty() && o.name == r.name) {
+                            Warn(h, Fmt(L"本地名 [%s] 与其它远端重名，请换一个。", r.name.c_str()));
+                            bad = true; break;
+                        }
+                    }
+                    if (bad) break;
                 }
                 if (bad) return 0;   // 校验不过：弹窗保持打开
             }
