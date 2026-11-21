@@ -2703,12 +2703,25 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
         if (id >= 400 && id < 400 + (int)st->rows.size() + 20 && code == BN_CLICKED) {   // 勾选默认远端：现有行/草稿行统一单选互斥——勾谁谁是默认
             int cid = id - 400;
             for (auto& r : st->rows) {
-                if (r.cid == cid && r.hChk && SendMessageW(r.hChk, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                if (r.cid != cid || !r.hChk) continue;
+                bool now = SendMessageW(r.hChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                if (now) {
+                    // 勾选即记录默认（编辑态从框里读最新名字，收起态用已存值）；OK 读取还会按勾选状态再核一遍
+                    std::wstring nm = r.name;
+                    if (r.hName) {
+                        int len = GetWindowTextLengthW(r.hName);
+                        std::wstring s(len, L'\0');
+                        GetWindowTextW(r.hName, &s[0], len + 1);
+                        nm = Trim(s);
+                    }
                     for (auto& o : st->rows)
                         if (&o != &r && o.hChk) SendMessageW(o.hChk, BM_SETCHECK, BST_UNCHECKED, 0);
-                    SetFocus(h);   // 焦点还给弹窗：空文本勾选框聚焦会画虚线框（之前红箭头指的那个）
-                    break;
+                    st->defaultPick = nm;
+                } else {
+                    st->defaultPick.clear();   // 取消勾选：清除默认记录（全不勾=纯本机）
                 }
+                SetFocus(h);   // 焦点还给弹窗：空文本勾选框聚焦会画虚线框（之前红箭头指的那个）
+                break;
             }
             return 0;
         }
@@ -2730,6 +2743,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                     readEdit(r.hUrl, r.url);
                     if (r.checked && !r.del) st->defaultPick = r.name;   // 勾选的行（现有/新增均可）= 默认远端
                 }
+                OutTxt(Fmt(L"[配置远程] OK 读取：行数=%d 默认=[%s]", (int)st->rows.size(), st->defaultPick.c_str()));   // 诊断：核对勾选读取
                 // 校验：别名非空且不重名（现有行改名/新行一律与其它行查重，排除自己）；新行还须链接非空
                 bool bad = false;
                 for (auto& r : st->rows) {
@@ -2885,6 +2899,7 @@ static void OpRemoteCfg() {
     }
     // 默认远端配置同步写入（UI 线程直接执行）：不能混进异步批次——批次中任一命令失败会中止后续，
     // 混在里面时勾选的默认远端就会因前序命令失败而丢失
+    OutTxt(Fmt(L"[配置远程] 生成的默认=[%s] 远端命令=%d 条", defaultPick.c_str(), (int)cmds.size()));   // 诊断：核对配置写入
     if (!defaultPick.empty()) {
         if (defaultPick != g_remote) {
             OutSep(); OutCmd(L"git config --local gittool.defaultremote " + defaultPick);
