@@ -172,6 +172,7 @@ static HFONT g_fontUI = nullptr, g_fontUIBold = nullptr, g_fontMono = nullptr;
 static HFONT g_fontUIBig = nullptr;                            // 关于弹窗工具名（13pt，比 UI 大 3 号）
 static HFONT g_fontUISmall = nullptr;                          // 关于弹窗其余控件（9pt，比 UI 小 1 号）
 static HFONT g_fontMenu = nullptr, g_fontMenuBold = nullptr;   // 左侧菜单小两号
+static HFONT g_fontSym = nullptr;                              // 符号按钮（✕/🖊，YaHei 无这些字形，须用 Segoe UI Symbol）
 static WNDPROC g_dirEditProc = nullptr, g_cmdEditProc = nullptr;
 static double g_scale = 1.0;
 
@@ -2472,8 +2473,8 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             SendMessageW(r.hChk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
             SendMessageW(r.hName, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
             SendMessageW(r.hUrl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
-            SendMessageW(r.hDel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
-            SendMessageW(r.hRe, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+            SendMessageW(r.hDel, WM_SETFONT, (WPARAM)g_fontSym, TRUE);   // ✕/🖊 须用 Segoe UI Symbol（YaHei 无字形画空白）
+            SendMessageW(r.hRe, WM_SETFONT, (WPARAM)g_fontSym, TRUE);
             st->rows.push_back(std::move(r));
             RemoteRowsRelayout(h, st);
             return 0;
@@ -4023,6 +4024,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_fontMono = MkFont(11, false, L"Consolas");
     g_fontMenu = MkFont(8, false, L"Microsoft YaHei UI");
     g_fontMenuBold = MkFont(8, true, L"Microsoft YaHei UI");
+    g_fontSym = MkFont(10, false, L"Segoe UI Symbol");   // ✕/🖊 字形仅在 Segoe UI Symbol，YaHei 画不出（GDI 不回退）
     // 注册左侧面板类
     WNDCLASSW wc = {};
     wc.lpfnWndProc = LeftPanelProc;
