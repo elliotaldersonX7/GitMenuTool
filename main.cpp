@@ -2423,7 +2423,7 @@ static bool g_remoteDlgLocked = false;
 static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
     int gap = (int)(6 * g_scale), hintH = (int)(18 * g_scale), addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
-    int wd = (int)(520 * g_scale), nameW = (int)(90 * g_scale);
+    int wd = (int)(640 * g_scale), nameW = (int)(90 * g_scale);
     int symW = (int)(26 * g_scale), symGap = (int)(4 * g_scale);   // ✕/🖊 符号按钮统一尺寸
     int xRe = wd - mg - 2 * (symW + symGap);                       // 🖊 位置（✕ 在其右）
     int contentRight = xRe - symGap;                               // 行内容区右界
@@ -2468,7 +2468,7 @@ static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
 // 建现有远端行控件（首次创建与事件解锁刷新共用）；rows 数据须已就位，建完由 RemoteRowsRelayout 统一摆位
 static void RemoteDlgBuildRows(HWND dlg, RemoteCfgState* st) {
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
-    int w = (int)(520 * g_scale);
+    int w = (int)(640 * g_scale);
     int symW = (int)(26 * g_scale), symGap = (int)(4 * g_scale);
     int xRe = w - mg - 2 * (symW + symGap);
     bool preMatch = false;
@@ -2539,6 +2539,7 @@ static void RemoteRowEndEdit(HWND h, RemoteCfgState* st, RemoteRow& r) {
         int len = GetWindowTextLengthW(he);
         std::wstring s(len, L'\0');
         GetWindowTextW(he, &s[0], len + 1);
+        s.erase(std::remove_if(s.begin(), s.end(), [](wchar_t c) { return c == L'\r' || c == L'\n'; }), s.end());   // 多行编辑框剔除换行
         out = Trim(s);
     };
     readEdit(r.hName, r.name);
@@ -2556,7 +2557,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
     RemoteCfgState* st = (RemoteCfgState*)data;
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
     int gap = (int)(6 * g_scale), addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
-    int wd = (int)(520 * g_scale), nameW = (int)(90 * g_scale);
+    int wd = (int)(640 * g_scale), nameW = (int)(90 * g_scale);
     switch (msg) {
     case WM_COMMAND: {
         int id = LOWORD(w), code = HIWORD(w);
@@ -2586,7 +2587,8 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                 mg, st->addY, (int)(22 * g_scale), rowEditH, h, (HMENU)(INT_PTR)(400 + n), g_hInst, nullptr);
             r.hName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 xName, st->addY, nameW, rowEditH, h, (HMENU)(INT_PTR)(1100 + n), g_hInst, nullptr);
-            r.hUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            r.hUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL,   // 多行去横向自动滚：拖选不抖动（换行符提交时剔除）
                 xUrl, st->addY, xRe - symGap - xUrl, rowEditH, h, (HMENU)(INT_PTR)(1200 + n), g_hInst, nullptr);
             r.hRe = CreateWindowExW(0, L"BUTTON", L"🖊", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 xRe, st->addY, symW, rowEditH, h, (HMENU)(INT_PTR)(1400 + n), g_hInst, nullptr);
@@ -2629,7 +2631,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0,
                         (int)(90 * g_scale), (int)(24 * g_scale), h, (HMENU)(INT_PTR)(1100 + r.cid), g_hInst, nullptr);
                     r.hUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", r.url.c_str(),
-                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0,
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL, 0, 0,   // 多行去横向自动滚：拖选不抖动
                         (int)(300 * g_scale), (int)(24 * g_scale), h, (HMENU)(INT_PTR)(1200 + r.cid), g_hInst, nullptr);
                     SendMessageW(r.hName, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
                     SendMessageW(r.hUrl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
@@ -2663,6 +2665,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                         int len = GetWindowTextLengthW(he);
                         std::wstring s(len, L'\0');
                         GetWindowTextW(he, &s[0], len + 1);
+                        s.erase(std::remove_if(s.begin(), s.end(), [](wchar_t c) { return c == L'\r' || c == L'\n'; }), s.end());   // 多行编辑框剔除换行
                         out = Trim(s);
                     };
                     readEdit(r.hName, r.name);
@@ -2740,7 +2743,7 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), gap = (int)(6 * g_scale);
     int hintH = (int)(18 * g_scale), rowEditH = (int)(24 * g_scale);
     int addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
-    int w = (int)(520 * g_scale);
+    int w = (int)(640 * g_scale);
     RemoteCfgState st;
     for (auto& pr : RemotesInOrder()) {                   // 配置文件出现顺序（新增顺序），非字母序
         RemoteRow rr;
