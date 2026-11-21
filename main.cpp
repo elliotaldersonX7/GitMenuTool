@@ -2205,7 +2205,9 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs(bool force = false) {
         lines->push_back({ SegT(L"未提交：", STAT_TXT, true), SegT(L" 0 ", STAT_GRN, false, BG_GRN) });
     // 已提交（本地 vs 勾选远端）：同步 绿色；本地领先(x)/远端领先(x) 橙色（真分叉才并列）
     std::vector<Seg> cm = { SegT(L"已提交：", STAT_TXT, true) };
-    if (!upstream.empty()) {
+    if (g_remote.empty()) {
+        cm.push_back(SegT(L"无默认远端", STAT_DIM));   // 未勾选默认远端：没有比较对象，不显示"同步"
+    } else if (!upstream.empty()) {
         if (ahead > 0 && behind > 0) {
             cm.push_back(SegT(L" 本地领先（" + std::to_wstring(ahead) + L"） ", STAT_ORG, false, BG_YLW));
             cm.push_back(SegT(L" / 远端领先（" + std::to_wstring(behind) + L"） ", STAT_ORG, false, BG_YLW));
