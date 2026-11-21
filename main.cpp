@@ -2203,18 +2203,18 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs(bool force = false) {
         lines->push_back({ SegT(L"未提交：", STAT_TXT, true), SegT(L" " + std::to_wstring(nTotal) + L" ", STAT_ORG, false, BG_YLW) });
     else
         lines->push_back({ SegT(L"未提交：", STAT_TXT, true), SegT(L" 0 ", STAT_GRN, false, BG_GRN) });
-    // 本地commit VS 远端commit：只显示非零方向（领先/落后不同时出现，真分叉才并列）
-    std::vector<Seg> cm = { SegT(L"本地commit VS 远端commit：", STAT_TXT, true) };
+    // 已提交（本地 vs 勾选远端）：同步 绿色；本地领先(x)/远端领先(x) 橙色（真分叉才并列）
+    std::vector<Seg> cm = { SegT(L"已提交：", STAT_TXT, true) };
     if (!upstream.empty()) {
         if (ahead > 0 && behind > 0) {
-            cm.push_back(SegT(L" 领先（" + std::to_wstring(ahead) + L"） ", STAT_BLU, true, BG_BLU));
-            cm.push_back(SegT(L" / 落后（" + std::to_wstring(behind) + L"） ", STAT_BLU, true, BG_BLU));
+            cm.push_back(SegT(L" 本地领先（" + std::to_wstring(ahead) + L"） ", STAT_ORG, false, BG_YLW));
+            cm.push_back(SegT(L" / 远端领先（" + std::to_wstring(behind) + L"） ", STAT_ORG, false, BG_YLW));
         } else if (ahead > 0) {
-            cm.push_back(SegT(L" 领先（" + std::to_wstring(ahead) + L"） ", STAT_BLU, true, BG_BLU));
+            cm.push_back(SegT(L" 本地领先（" + std::to_wstring(ahead) + L"） ", STAT_ORG, false, BG_YLW));
         } else if (behind > 0) {
-            cm.push_back(SegT(L" 落后（" + std::to_wstring(behind) + L"） ", STAT_BLU, true, BG_BLU));
+            cm.push_back(SegT(L" 远端领先（" + std::to_wstring(behind) + L"） ", STAT_ORG, false, BG_YLW));
         } else {
-            cm.push_back(SegT(L" 0 ", STAT_GRN, false, BG_GRN));
+            cm.push_back(SegT(L" 同步 ", STAT_GRN, false, BG_GRN));
         }
     } else {
         cm.push_back(SegT(L"无上游跟踪", STAT_DIM));
