@@ -579,25 +579,15 @@ static std::vector<std::pair<std::wstring, std::wstring>> RemotesInOrder() {
     }
     return out;
 }
-// 默认远端：优先当前分支上游远端（upstreamKnown 非空时直接用，省一次子进程）；否则第一个远端；无返回空
-static std::wstring DetectRemote(const std::wstring& upstreamKnown = L"") {
+// 默认远端：只认用户在【配置远程】里显式勾选的（仓库级配置 gittool.defaultremote）；无显式选择返回空。
+// 不回退上游分支/第一个远端——回退会让"全不勾=纯本机"形同虚设，未勾选时远程操作仍能偷偷成功
+static std::wstring DetectRemote() {
     if (g_repo.empty()) return L"";
-    auto rems = RemotesInOrder();
-    if (rems.empty()) return L"";
-    // ① 用户在【配置远程】里选定的默认远端优先（写入仓库级配置 gittool.defaultremote）
     std::wstring picked = Trim(GitOut({ L"config", L"--get", L"gittool.defaultremote" }));
-    for (auto& r : rems) if (r.first == picked) return r.first;
-    // ② 上游分支对应的远端
-    std::wstring up = !upstreamKnown.empty() ? upstreamKnown
-                      : Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
-    if (!up.empty()) {
-        size_t i = up.find(L'/');
-        if (i != std::wstring::npos) {
-            std::wstring rn = up.substr(0, i);
-            for (auto& r : rems) if (r.first == rn) return r.first;
-        }
-    }
-    return rems[0].first;
+    if (picked.empty()) return L"";
+    for (auto& r : RemotesInOrder())
+        if (r.first == picked) return r.first;   // 显式选的远端已不存在（被删/改名未跟进）视为未选择
+    return L"";
 }
 
 // ============================ RichEdit 富文本 ===============================
@@ -2182,7 +2172,7 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs(bool force = false) {
         else     lines->push_back({ SegT(L"（该目录还不是 git 仓库，请点顶栏【✚ 初始化仓库】）", STAT_DIM) });
         return lines;
     }
-    g_remote = DetectRemote(upstream);
+    g_remote = DetectRemote();
     // ③④⑤ 环节状态（分支/上游/有无提交 已由 status 合并探测得出）
     bool s2 = false, s3 = false, s4 = false;
     std::error_code ec;
@@ -2264,7 +2254,7 @@ static bool EnsureRepo() {
 static bool NeedRemote() {
     // 返回 true = 已弹窗提示且调用方应中止；false = 有远端，继续执行
     if (g_remote.empty()) {
-        Warn(g_main, L"该仓库尚未配置远端。\n涉及远端的操作（推送/拉取等）需要先配置：\n请点【配置远程】添加远端地址。\n纯本地 git 管理的仓库无需配置。");
+        Warn(g_main, L"该仓库未勾选默认远端。\n涉及远端的操作（推送/拉取等）需要先勾选：\n请点【配置远程】勾选一个作为默认远端。\n纯本地 git 管理的仓库无需勾选。");
         return true;
     }
     return false;
