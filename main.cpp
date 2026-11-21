@@ -2830,8 +2830,9 @@ static void OpRemoteCfg() {
     }
     if (!defaultPick.empty() && defaultPick != g_remote) {
         cmds.push_back({ G({ L"config", L"--local", L"gittool.defaultremote", defaultPick }), false });
-    } else if (defaultPick.empty()) {
-        // 全不勾 = 纯本机模式：清掉残留的默认远端配置，否则重开弹窗仍显示上次勾选
+    } else if (defaultPick.empty()
+               && !Trim(GitOut({ L"config", L"--get", L"gittool.defaultremote" })).empty()) {
+        // 全不勾 = 纯本机模式：清掉残留的默认远端配置，否则重开弹窗仍显示上次勾选（确有残留才发，避免无用报错）
         cmds.push_back({ G({ L"config", L"--local", L"--unset", L"gittool.defaultremote" }), true });   // 本就未设置时报错属正常，不阻断
     }
     if (cmds.empty()) return;
