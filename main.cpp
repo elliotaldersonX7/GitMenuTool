@@ -2689,6 +2689,14 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
         }
         return 0;
     }
+    case WM_LBUTTONDOWN: {
+        // 点弹窗空白处：静态/背景不抢焦点，编辑框收不到 KILLFOCUS——这里强制提交所有编辑中的行
+        bool committed = false;
+        for (auto& r : st->rows)
+            if (r.existing && (r.hName || r.hUrl)) { RemoteRowEndEdit(h, st, r); committed = true; }
+        if (committed) InvalidateRect(h, nullptr, TRUE);
+        break;   // 交默认处理
+    }
     case WM_TIMER: {
         // 失焦延迟确认：别名框→链接框切换也会触发 KILLFOCUS，定时器到点时检查焦点
         // 真的离开本行两框才提交；若焦点在另一框（仍在编辑）则不动作
