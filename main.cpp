@@ -2420,9 +2420,8 @@ static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
             }
             yy += rowChkH + gap;
         } else {
-            int xName = mg + (int)(26 * g_scale);
+            int xName = mg + (int)(26 * g_scale);       // 草稿行无勾选框，与现有行编辑态对齐
             int xUrl = xName + nameW + (int)(6 * g_scale);
-            if (r.hChk) MoveWindow(r.hChk, mg, yy, (int)(22 * g_scale), rowEditH, TRUE);
             if (r.hName) MoveWindow(r.hName, xName, yy, nameW, rowEditH, TRUE);
             if (r.hUrl) MoveWindow(r.hUrl, xUrl, yy, contentRight - xUrl, rowEditH, TRUE);
             if (r.hRe) MoveWindow(r.hRe, xRe, yy, symW, rowEditH, TRUE);
@@ -2558,13 +2557,10 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             int n = st->nextIdx++;
             RemoteRow r;
             r.cid = n;
-            r.checked = false;                           // 默认不勾选：勾选=确认加入
             int symW = (int)(26 * g_scale), symGap = (int)(4 * g_scale);
             int xRe = wd - mg - 2 * (symW + symGap);     // 🖊（✕ 在其右），内容区让到它们左侧，防勾选时误触删除
-            int xName = mg + (int)(26 * g_scale);
+            int xName = mg + (int)(26 * g_scale);        // 草稿行无勾选框（勾选=默认远端，仅现有行），与现有行编辑态对齐
             int xUrl = xName + nameW + (int)(6 * g_scale);
-            r.hChk = CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                mg, st->addY, (int)(22 * g_scale), rowEditH, h, (HMENU)(INT_PTR)(1000 + n), g_hInst, nullptr);
             r.hName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 xName, st->addY, nameW, rowEditH, h, (HMENU)(INT_PTR)(1100 + n), g_hInst, nullptr);
             r.hUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
@@ -2666,8 +2662,9 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                             }
                             if (bad) break;
                         }
-                    } else if (r.checked) {
-                        if (r.name.empty() || r.url.empty()) { Warn(h, L"新增远端需要填写 本地名 和 链接（或取消勾选该行）。"); bad = true; break; }
+                    } else {
+                        if (r.name.empty() && r.url.empty()) continue;   // 空草稿行：忽略不生成命令
+                        if (r.name.empty() || r.url.empty()) { Warn(h, L"新增远端需要填写 本地名 和 链接（或点该行 ✕ 移除）。"); bad = true; break; }
                         if (r.name == st->defaultPick) { Warn(h, Fmt(L"本地名 [%s] 与保留的默认远端重名，请换一个。", r.name.c_str())); bad = true; break; }
                     }
                 }
@@ -2796,8 +2793,8 @@ static void OpRemoteCfg() {
             cmds.push_back(G({ L"remote", L"rename", r.name0, r.name }));   // 🖊 改过别名：先改名（后续 set-url 用新名）
         if (r.existing && r.hUrl && !r.url.empty() && r.url != r.url0)
             cmds.push_back(G({ L"remote", L"set-url", r.name, r.url }));    // 🖊 改过链接才生成 set-url（rename 已先执行）
-        if (!r.existing && r.checked && !r.name.empty() && !r.url.empty())
-            cmds.push_back(G({ L"remote", L"add", r.name, r.url }));
+        if (!r.existing && !r.name.empty() && !r.url.empty())
+            cmds.push_back(G({ L"remote", L"add", r.name, r.url }));        // 草稿行：填了就加入（✕ 移除的不算）
     }
     if (!defaultPick.empty() && defaultPick != g_remote)
         cmds.push_back(G({ L"config", L"--local", L"gittool.defaultremote", defaultPick }));
