@@ -2514,7 +2514,7 @@ static void RemoteDlgUnlock(HWND h) {
     if (st->hAdd) EnableWindow(st->hAdd, TRUE);
     if (st->hOk) EnableWindow(st->hOk, TRUE);
     if (st->hHint) SetWindowTextW(st->hHint,
-        L"勾选一个作为默认远端（可不勾选，纯本机开发）；去勾选仅取消默认，行尾 🖊 改链接 / ✕ 删除远端：");
+        L"勾选默认远端：");
     RemoteRowsRelayout(h, st);                    // 行数可能变化：重摆位并同步弹窗高度
     SendMessageW(h, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(h, nullptr, TRUE);
@@ -2687,7 +2687,7 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
     g_hRemoteDlg = dlg; g_remoteDlgState = &st; g_remoteDlgLocked = locked;   // JOBDONE 事件解锁用
     HWND hHint = CreateWindowExW(0, L"STATIC",
         locked ? L"有远端操作进行中，完成后才能配置远端（当前内容只读）："
-               : L"勾选一个作为默认远端（可不勾选，纯本机开发）；去勾选仅取消默认，行尾 🖊 改链接 / ✕ 删除远端：",
+               : L"勾选默认远端：",
         WS_CHILD | WS_VISIBLE, mg, mg, w - 2 * mg, hintH, dlg, nullptr, g_hInst, nullptr);
     SendMessageW(hHint, WM_SETFONT, (WPARAM)g_fontMenu, TRUE);
     st.hHint = hHint;   // 事件解锁时恢复提示文字用
