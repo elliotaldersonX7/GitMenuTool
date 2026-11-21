@@ -2737,11 +2737,12 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
         break;   // 交默认处理
     }
     case WM_TIMER: {
-        // 失焦延迟提交：定时器到点时若该行仍处于编辑态则提交（行内两框间切换也会走这里，
-        // 但焦点已离开本行才会提交；切换到另一框的 KILLFOCUS 会再次设定时器，行内停留不影响）
+        // 失焦延迟提交：到点时若焦点已回到本行另一框（别名↔链接切换）则不提交；离开本行才收起
         for (auto& r : st->rows) {
             if ((int)w == 100 + r.cid && (r.hName || r.hUrl)) {
                 KillTimer(h, w);
+                HWND f = GetFocus();
+                if (f == r.hName || f == r.hUrl) return 0;   // 行内切换：继续编辑
                 RemoteRowEndEdit(h, st, r);
                 return 0;
             }
