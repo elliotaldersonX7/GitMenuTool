@@ -2237,7 +2237,7 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs(bool force = false) {
                       same ? STAT_GRN : (localLeads ? STAT_ORG : STAT_DIM), false,
                       same ? BG_GRN : (localLeads ? BG_YLW : 0)));
     if (g_remote.empty())
-        tg.push_back(SegT(L" 远端：（未配置远端）", STAT_DIM));
+        tg.push_back(SegT(L" 远端：无默认远端", STAT_DIM));
     else if (td.netOk)
         tg.push_back(SegT(L" 远端：" + (td.remoteLatest.empty() ? std::wstring(L"（无）") : td.remoteLatest) + L" ",
                           same ? STAT_GRN : (localLeads ? STAT_DIM : STAT_ORG), false,
