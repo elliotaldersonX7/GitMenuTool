@@ -2213,20 +2213,7 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs(bool force = false) {
     else
         tg.push_back(SegT(L" 远端最新：未知（网络不可达，可配置代理）", STAT_DIM));
     lines->push_back(tg);
-    // 远端两行
-    if (!g_remote.empty()) {
-        lines->push_back({ SegT(L"远端名称(本地别名)：", STAT_TXT, true), SegT(L" " + g_remote + L" ", STAT_TXT, false, BG_GRY) });
-        g_statUrl = Trim(GitOut({ L"config", L"--get", L"remote." + g_remote + L".url" }));
-        // URL 不用 CFE_LINK 链接样式（下划线盖住 _ 字符、吸附范围异常）；
-        // 手型光标与点击由 RichBaseSub 的字符级命中测试处理
-        lines->push_back({ SegT(L"远端地址：", STAT_TXT, true), SegT(L"  ", STAT_TXT),
-                           SegT(g_statUrl.empty() ? L"（未取到）" : g_statUrl, STAT_BLU),
-                           SegT(L" ↗", STAT_BLU) });
-    } else {
-        g_statUrl.clear();
-        lines->push_back({ SegT(L"远端名称(本地别名)：", STAT_TXT, true), SegT(L"（未设置）", STAT_DIM) });
-        lines->push_back({ SegT(L"远端地址：", STAT_TXT, true), SegT(L"（未配置，可点左侧【配置远程】）", STAT_DIM) });
-    }
+    g_statUrl.clear();   // 状态卡不再显示远端两行：别名/地址/默认勾选全部收敛到【配置远程】弹窗（打开即实时列出全部远端）
     return lines;
 }
 static void RefreshStatusAsync(bool force) {
