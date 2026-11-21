@@ -2444,7 +2444,7 @@ struct RemoteRow {
 };
 struct RemoteCfgState {
     std::vector<RemoteRow> rows;
-    HWND hDlg = nullptr, hAdd = nullptr, hOk = nullptr, hCancel = nullptr, hHint = nullptr;
+    HWND hDlg = nullptr, hAdd = nullptr, hOk = nullptr, hHint = nullptr;
     std::wstring defaultPick;             // OK 时勾选的那个远端 = 默认远端（只能勾一个）
     std::wstring initPick;                // 打开时的默认远端（事件解锁重建行时预勾用）
     int addY = 0, ch = 0, nextIdx = 0;
@@ -2494,8 +2494,7 @@ static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
     st->addY = yy;
     if (st->hAdd) MoveWindow(st->hAdd, mg, st->addY, (int)(110 * g_scale), addH, TRUE);
     int by = st->addY + addH + (int)(12 * g_scale);
-    if (st->hOk) MoveWindow(st->hOk, wd - 2 * (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, TRUE);
-    if (st->hCancel) MoveWindow(st->hCancel, wd - (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, TRUE);
+    if (st->hOk) MoveWindow(st->hOk, wd - (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, TRUE);
     int oldCh = st->ch;
     st->ch = st->addY + addH + (int)(12 * g_scale) + btnH + mg;
     RECT fr; GetWindowRect(h, &fr);
@@ -2812,7 +2811,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
     return DefSubclassProc(h, msg, w, l);
 }
 // 配置远程弹窗：勾选行=默认远端(单选，勾选自动互斥)+保留，去勾选=删除；【＋添加远端】动态行；
-// locked=true（有远端操作进行中）时全部内容置灰只读，仅 Cancel 可关；返回 rows 供调用方统一生成命令
+// locked=true（有远端操作进行中）时全部内容置灰只读，仅 X 可关；返回 rows 供调用方统一生成命令
 static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPick, bool locked, bool* okFlag = nullptr) {
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), gap = (int)(6 * g_scale);
     int hintH = (int)(18 * g_scale), rowEditH = (int)(24 * g_scale);
@@ -2854,13 +2853,11 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
     st.hAdd = CreateWindowExW(0, L"BUTTON", L"＋ 添加远端", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         mg, st.addY, (int)(110 * g_scale), addH, dlg, (HMENU)290, g_hInst, nullptr);
     int by = st.addY + addH + (int)(12 * g_scale);
-    st.hOk = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-        w - 2 * (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
-    st.hCancel = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-        w - (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
-    for (HWND c : { st.hAdd, st.hOk, st.hCancel })
+    st.hOk = CreateWindowExW(0, L"BUTTON", L"应用", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        w - (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, dlg, (HMENU)IDOK, g_hInst, nullptr);
+    for (HWND c : { st.hAdd, st.hOk })
         SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
-    if (locked) {   // 有远端操作进行中：全部内容置灰不可选，仅 Cancel 可关闭弹窗
+    if (locked) {   // 有远端操作进行中：全部内容置灰不可选，仅 X 可关闭弹窗
         for (auto& r : st.rows)
             for (HWND hc : { r.hChk, r.hName, r.hUrl, r.hDel, r.hRe, r.hLbl })
                 if (hc) EnableWindow(hc, FALSE);
@@ -2869,7 +2866,7 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
     }
     EnableWindow(parent, FALSE);
     ShowWindow(dlg, SW_SHOW);
-    SetFocus(locked ? st.hCancel : (nExist ? st.rows[0].hChk : st.hAdd));
+    SetFocus(locked ? dlg : (nExist ? st.rows[0].hChk : st.hAdd));   // 锁定态焦点给弹窗本身（各控件已禁用）
     MSG msg;
     while (!st.done && GetMessageW(&msg, nullptr, 0, 0)) {
         if (IsDialogMessageW(dlg, &msg)) continue;
