@@ -2449,6 +2449,7 @@ struct RemoteCfgState {
     std::wstring initPick;                // 打开时的默认远端（事件解锁重建行时预勾用）
     int addY = 0, ch = 0, nextIdx = 0;
     bool done = false;
+    bool ok = false;                      // 以 OK 关闭=true；X/Cancel 关闭=false（纯关闭不动配置）
 };
 static const int REMOTE_UI_MAX = 10;   // 弹窗界面软上限（git 支持任意多个，超了用底部命令行）
 // 弹窗句柄/状态指针/锁定态：供 WM_APP_JOBDONE 事件解锁用（远端操作完成时自动以解锁态重开弹窗）
@@ -2768,6 +2769,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                     if (bad) break;
                 }
                 if (bad) return 0;   // 校验不过：弹窗保持打开
+                st->ok = true;       // 以 OK 关闭：允许应用勾选与远端修改（X/Cancel 关闭则为纯关闭）
             }
             st->done = true;
             DestroyWindow(h);
@@ -2811,7 +2813,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
 }
 // 配置远程弹窗：勾选行=默认远端(单选，勾选自动互斥)+保留，去勾选=删除；【＋添加远端】动态行；
 // locked=true（有远端操作进行中）时全部内容置灰只读，仅 Cancel 可关；返回 rows 供调用方统一生成命令
-static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPick, bool locked) {
+static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPick, bool locked, bool* okFlag = nullptr) {
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), gap = (int)(6 * g_scale);
     int hintH = (int)(18 * g_scale), rowEditH = (int)(24 * g_scale);
     int addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
@@ -2877,13 +2879,16 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
     EnableWindow(parent, TRUE);
     SetActiveWindow(parent);
     defaultPick = st.defaultPick;   // 勾选的那个远端 = 默认远端（校验已保证有且只有一个）
+    if (okFlag) *okFlag = st.ok;    // false=X/Cancel 关闭：调用方不得动任何配置
     return st.rows;
 }
 // 配置远程：OK 后统一生成命令——行内【删除】标记的现有远端 remote remove，勾选的新行 remote add；默认远端变更写仓库级配置
 static void OpRemoteCfg() {
     // 只认显式选择：若传 g_remote（带上游/首远端兜底），全不勾后重开仍会被兜底值预勾
     std::wstring defaultPick = Trim(GitOut({ L"config", L"--get", L"gittool.defaultremote" }));
-    auto rows = AskRemoteCfg(g_main, defaultPick, g_busy);   // g_busy=远端操作进行中：弹窗只读，OK 禁用必然走 Cancel 无命令
+    bool dlgOk = false;
+    auto rows = AskRemoteCfg(g_main, defaultPick, g_busy, &dlgOk);   // g_busy=远端操作进行中：弹窗只读，OK 禁用必然走 Cancel 无命令
+    if (!dlgOk) return;   // X/Cancel 关闭：纯关闭，勾选/修改全部不生效——绝不触碰默认远端配置
     std::vector<JobCmd> cmds;
     for (auto& r : rows) {
         if (r.existing && r.del) {
