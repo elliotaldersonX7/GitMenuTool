@@ -3094,16 +3094,16 @@ static void OpDeleteCommit() {
             L"确认删除请输入大写 Y（其他输入或留空=取消）：";
     auto y = AskText(g_main, L"删除提交（危险操作）", note);
     if (!y || *y != L"Y") return;
-    // 强推判定：上游存在且远端仍指向将被删除的提交
+    std::wstring br = CurBranch();
+    // 强推判定：勾选的默认远端分支仍指向将被删除的提交（裸 push --force-with-lease 走上游跟踪，勾选会失效）
     std::vector<std::vector<std::wstring>> cmds;
     cmds.push_back(G({ L"reset", L"--hard", sha }));
-    std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     bool doPush = false;
-    if (!up.empty()) {
-        std::wstring rcnt = Trim(GitOut({ L"rev-list", L"--count", sha + L"..@{u}" }));
+    if (!g_remote.empty()) {
+        std::wstring rcnt = Trim(GitOut({ L"rev-list", L"--count", sha + L".." + g_remote + L"/" + br }));
         if (!rcnt.empty() && rcnt != L"0"
             && Confirm(g_main, L"被删的提交已推送过远端，远端仍指向旧历史。\n是否删除后立即强制推送远端？\n（--force-with-lease：远端有别人新提交时会被拒绝，不误覆盖）")) {
-            cmds.push_back(G({ L"push", L"--force-with-lease" }));
+            cmds.push_back(G({ L"push", L"--force-with-lease", g_remote, br }));
             doPush = true;
         }
     }
