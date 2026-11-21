@@ -2818,24 +2818,6 @@ static void OpRemoteCfg() {
     ExecV(std::move(cmds));
     RefreshStatusAsync();   // 默认远端可能变化（被删/新增/手动选择），立即刷新
 }
-static void OpRemoteRename() {
-    if (!EnsureRepo() || NeedRemote()) return;
-    std::vector<std::wstring> rems;
-    for (auto& l : SplitLines(GitOut({ L"remote" }))) { std::wstring t = Trim(l); if (!t.empty()) rems.push_back(t); }
-    if (rems.empty()) return;
-    std::wstring old = rems[0];
-    if (rems.size() > 1) {
-        std::wstring hint;
-        for (auto& r : rems) { if (!hint.empty()) hint += L", "; hint += r; }
-        auto pick = AskText(g_main, L"远端改名(本地别名)", Fmt(L"本仓库有多个远端(%s)，要改哪个:", hint.c_str()), g_remote);
-        if (!pick || pick->empty()) return;
-        old = *pick;
-    }
-    auto nw = AskText(g_main, L"远端改名(本地别名)", Fmt(L"现有远端名(本地别名): %s\n新远端名:", old.c_str()));
-    if (!nw || nw->empty()) return;
-    Exec({ G({ L"remote", L"rename", old, *nw }) });
-    RefreshStatusAsync();   // 立即刷新：g_remote 换成新别名，避免刷新前点推送用到旧名
-}
 static void OpTagNew() {
     if (!EnsureRepo()) return;
     auto name = AskText(g_main, L"打标签", L"标签名（如 v1.0）:");
@@ -3420,7 +3402,7 @@ static void OpResetGit() {
 }
 // ============================ 左侧菜单表 ====================================
 enum {
-    IDM_REMOTE_ADD = IDM_BASE, IDM_REMOTE_RENAME,
+    IDM_REMOTE_ADD = IDM_BASE,
     IDM_CLONE, IDM_STATUS, IDM_DIFF, IDM_COMMIT, IDM_PUSH, IDM_FORCE_PUSH, IDM_PULL, IDM_LOG_ALL, IDM_SHOW, IDM_REMOTE_INFO,
     IDM_TAG_LIST, IDM_TAG_NEW, IDM_TAG_PUSH, IDM_TAG_DEL, IDM_TAG_RDEL,
     IDM_BRANCH_SW, IDM_BRANCH_NEW, IDM_BRANCH_MERGE, IDM_BRANCH_DEL, IDM_CHECKOUT_REF, IDM_BACK_MAIN, IDM_STASH, IDM_STASH_POP,
@@ -3432,7 +3414,6 @@ struct MenuCat  { const wchar_t* title; std::vector<MenuItem> items; };
 static const MenuCat MENU[] = {
     { L"远端", {
         { IDM_REMOTE_ADD,    L"配置远程",         OpRemoteCfg },
-        { IDM_REMOTE_RENAME, L"远端改名(本地别名)", OpRemoteRename },
     } },
     // 克隆仓库已移到顶栏（IDM_CLONE 显式分发），左侧不再显示
     { L"日常", {
