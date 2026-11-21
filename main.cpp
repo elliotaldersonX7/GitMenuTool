@@ -399,12 +399,28 @@ static std::wstring GitOut(const std::vector<std::wstring>& args, DWORD timeoutM
     return r.rc == 0 ? r.out : L"";
 }
 // ============================ 检查更新（GitHub Release）======================
-// WinINet 同步 GET（只在后台线程调用）；proxy=true 走系统代理，false 直连；失败返回空串
+// 统一网络来源：检查更新/下载与 git 远端操作共用【代理配置】写入的 github.com 代理。
+// 代理尝试链：git 配置的代理（若有）→ 系统代理 → 直连
+// 读【代理配置】写入的 github.com 代理（git 全局配置 http.https://github.com/.proxy）；未配置返回空
+static std::wstring GetGithubProxy() {
+    return Trim(GitOut({ L"config", L"--global", L"--get", L"http.https://github.com/.proxy" }));
+}
+// git 代理串（http://host:port / socks5://host:port）转 WinINet 代理串
+static std::wstring ToWinInetProxy(const std::wstring& gitProxy) {
+    bool socks = (gitProxy.rfind(L"socks5://", 0) == 0 || gitProxy.rfind(L"socks://", 0) == 0);
+    size_t pos = gitProxy.find(L"://");
+    std::wstring hostport = (pos == std::wstring::npos) ? gitProxy : gitProxy.substr(pos + 3);
+    return socks ? L"socks=" + hostport : hostport;   // 裸 host:port 对所有协议生效
+}
+// WinINet 同步 GET（只在后台线程调用）；proxy：空串=直连、L"system"=系统代理、其它=显式代理串；失败返回空串
 // onPct 非空且响应带 Content-Length 时按已收字节回调百分比（仅大文件下载用）
-static std::string HttpGetVia(bool useProxy, const std::wstring& url, void (*onPct)(int) = nullptr) {
+static std::string HttpGetVia(const std::wstring& proxy, const std::wstring& url, void (*onPct)(int) = nullptr) {
     std::string out;
-    HINTERNET hOpen = InternetOpenW(L"GitMenuTool",
-        useProxy ? INTERNET_OPEN_TYPE_PRECONFIG : INTERNET_OPEN_TYPE_DIRECT, nullptr, nullptr, 0);
+    bool sys = (proxy == L"system");
+    DWORD openType = proxy.empty() ? INTERNET_OPEN_TYPE_DIRECT
+                   : (sys ? INTERNET_OPEN_TYPE_PRECONFIG : INTERNET_OPEN_TYPE_PROXY);
+    HINTERNET hOpen = InternetOpenW(L"GitMenuTool", openType,
+        (proxy.empty() || sys) ? nullptr : ToWinInetProxy(proxy).c_str(), nullptr, 0);
     if (!hOpen) return out;
     DWORD t = 15000;   // 连接/发送/接收统一 15 秒超时，GitHub 不通时尽快放弃
     InternetSetOptionW(hOpen, INTERNET_OPTION_CONNECT_TIMEOUT, &t, sizeof(t));
@@ -429,24 +445,39 @@ static std::string HttpGetVia(bool useProxy, const std::wstring& url, void (*onP
     InternetCloseHandle(hOpen);
     return out;
 }
-// 检查更新取 JSON：系统代理优先（未配置代理时 WinINet PRECONFIG 自动等效直连），内容无
-// "tag_name" 字段（403/404 错误页）再走纯直连兜底；都无效返回空
-// rateLimited 出参：两路响应都是 GitHub 限流页时置 true（匿名 60 次/小时/IP），供文案区分
+// 检查更新取 JSON：统一尝试链 git 配置代理（若有）→ 系统代理 → 直连；内容无 "tag_name"
+// 字段（403/404 错误页）视为该路无效；都无效返回空
+// rateLimited 出参：各路响应都是 GitHub 限流页时置 true（匿名 60 次/小时/IP），供文案区分
+static bool HttpHasTag(const std::string& s) { return s.find("\"tag_name\"") != std::string::npos; }
 static std::string HttpGetUtf8(const std::wstring& url, bool* rateLimited = nullptr) {
-    std::string s1 = HttpGetVia(true, url);
-    if (s1.find("\"tag_name\"") != std::string::npos) return s1;
-    std::string s2 = HttpGetVia(false, url);
-    if (s2.find("\"tag_name\"") != std::string::npos) return s2;
-    if (rateLimited)
-        *rateLimited = s1.find("rate limit") != std::string::npos
-                    || s2.find("rate limit") != std::string::npos;
+    std::wstring gp = GetGithubProxy();
+    std::string s = HttpGetVia(gp, url);
+    if (HttpHasTag(s)) return s;
+    bool limited = s.find("rate limit") != std::string::npos;
+    if (gp.empty()) {
+        s = HttpGetVia(L"system", url);   // 无 git 代理：系统代理 → 直连
+        if (HttpHasTag(s)) return s;
+        limited = limited || s.find("rate limit") != std::string::npos;
+        s = HttpGetVia(L"", url);
+    } else {
+        s = HttpGetVia(L"system", url);
+        if (HttpHasTag(s)) return s;
+        limited = limited || s.find("rate limit") != std::string::npos;
+        s = HttpGetVia(L"", url);   // 有 git 代理：仍以直连兜底（代理挂了不至于彻底失联）
+    }
+    if (HttpHasTag(s)) return s;
+    limited = limited || s.find("rate limit") != std::string::npos;
+    if (rateLimited) *rateLimited = limited;
     return "";
 }
-// 下载 exe 二进制：系统代理优先（>100KB 视为有效，错误页只有几百字节），无效再走纯直连兜底；onPct 透传进度回调
+// 下载 exe 二进制：统一尝试链同上（>100KB 视为有效，错误页只有几百字节）；onPct 透传进度回调
 static std::string HttpDownload(const std::wstring& url, void (*onPct)(int) = nullptr) {
-    std::string s = HttpGetVia(true, url, onPct);
+    std::wstring gp = GetGithubProxy();
+    std::string s = HttpGetVia(gp, url, onPct);
     if (s.size() > 100 * 1024) return s;
-    s = HttpGetVia(false, url, onPct);
+    s = HttpGetVia(L"system", url, onPct);
+    if (s.size() > 100 * 1024) return s;
+    s = HttpGetVia(L"", url, onPct);
     if (s.size() > 100 * 1024) return s;
     return "";
 }
