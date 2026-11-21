@@ -2585,7 +2585,10 @@ static void RemoteRowEndEdit(HWND h, RemoteCfgState* st, RemoteRow& r) {
     readEdit(r.hUrl, r.url);
     for (HWND hc : { r.hName, r.hUrl }) if (hc) DestroyWindow(hc);
     r.hName = r.hUrl = nullptr;
-    if (!r.existing && r.name.empty() && r.url.empty()) {   // 空草稿行：直接移除，不留空行
+    if (!r.existing && r.name.empty() && r.url.empty()) {   // 空草稿行：整行移除，销毁全部控件（勾选框/🖊/✕ 一并清理，不留孤儿）
+        for (HWND hc : { r.hChk, r.hName, r.hUrl, r.hDel, r.hRe, r.hLbl })
+            if (hc) DestroyWindow(hc);
+        r.hChk = r.hName = r.hUrl = r.hDel = r.hRe = r.hLbl = nullptr;
         for (auto it = st->rows.begin(); it != st->rows.end(); ++it)
             if (&*it == &r) { st->rows.erase(it); break; }
         RemoteRowsRelayout(h, st);
