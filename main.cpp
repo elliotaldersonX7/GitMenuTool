@@ -2525,6 +2525,26 @@ static void RemoteDlgUnlock(HWND h) {
     InvalidateRect(h, nullptr, TRUE);
     SetFocus(st->rows.empty() ? st->hAdd : st->rows[0].hChk);
 }
+// 结束现有行编辑：读入别名/链接（空值回退原值），销毁编辑框、行退回静态文本显示
+static void RemoteRowEndEdit(HWND h, RemoteCfgState* st, RemoteRow& r) {
+    auto readEdit = [&](HWND he, std::wstring& out) {
+        if (!he) return;
+        int len = GetWindowTextLengthW(he);
+        std::wstring s(len, L'\0');
+        GetWindowTextW(he, &s[0], len + 1);
+        out = Trim(s);
+    };
+    readEdit(r.hName, r.name);
+    readEdit(r.hUrl, r.url);
+    if (r.name.empty()) r.name = r.name0;   // 空别名回退原值，防产生空名命令
+    if (r.url.empty()) r.url = r.url0;
+    for (HWND hc : { r.hName, r.hUrl }) if (hc) DestroyWindow(hc);
+    r.hName = r.hUrl = nullptr;
+    r.hLbl = CreateWindowExW(0, L"STATIC", (r.name + L" → " + r.url).c_str(), WS_CHILD | WS_VISIBLE,
+        0, 0, (int)(10 * g_scale), (int)(10 * g_scale), h, nullptr, g_hInst, nullptr);
+    SendMessageW(r.hLbl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    RemoteRowsRelayout(h, st);              // 统一摆位（静态文本宽度按行重算）
+}
 static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
     RemoteCfgState* st = (RemoteCfgState*)data;
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
@@ -2533,6 +2553,14 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
     switch (msg) {
     case WM_COMMAND: {
         int id = LOWORD(w), code = HIWORD(w);
+        if (code == EN_KILLFOCUS) {                      // 现有行编辑框失焦：延迟确认焦点真的离开本行 → 自动提交退回静态文本
+            int cid = -1;
+            if (id >= 1100 && id < 1200) cid = id - 1100;
+            if (id >= 1200 && id < 1300) cid = id - 1200;
+            for (auto& r : st->rows)
+                if (r.cid == cid && r.existing && (r.hName || r.hUrl)) { SetTimer(h, 100 + cid, 80, nullptr); break; }
+            return 0;
+        }
         if (id == 290 && code == BN_CLICKED) {           // ＋添加远端：追加一行（默认不勾选=暂不加入），弹窗加高
             if ((int)st->rows.size() >= REMOTE_UI_MAX) {
                 Warn(h, Fmt(L"界面最多管理 %d 个远端（git 本身无限制，更多可用底部命令行）。", REMOTE_UI_MAX));
@@ -2658,6 +2686,19 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             }
             st->done = true;
             DestroyWindow(h);
+        }
+        return 0;
+    }
+    case WM_TIMER: {
+        // 失焦延迟确认：别名框→链接框切换也会触发 KILLFOCUS，定时器到点时检查焦点
+        // 真的离开本行两框才提交；若焦点在另一框（仍在编辑）则不动作
+        for (auto& r : st->rows) {
+            if ((int)w == 100 + r.cid && r.existing && (r.hName || r.hUrl)) {
+                KillTimer(h, w);
+                HWND f = GetFocus();
+                if (f != r.hName && f != r.hUrl) RemoteRowEndEdit(h, st, r);
+                return 0;
+            }
         }
         return 0;
     }
