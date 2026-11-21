@@ -2403,7 +2403,7 @@ static const int REMOTE_UI_MAX = 10;   // 弹窗界面软上限（git 支持任�
 static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
     int gap = (int)(6 * g_scale), hintH = (int)(18 * g_scale), addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
-    int wd = (int)(520 * g_scale), nameW = (int)(150 * g_scale);
+    int wd = (int)(520 * g_scale), nameW = (int)(90 * g_scale);
     int yy = mg + hintH + (int)(4 * g_scale);
     for (auto& r : st->rows) {
         if (r.existing) {
@@ -2435,7 +2435,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
     RemoteCfgState* st = (RemoteCfgState*)data;
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
     int gap = (int)(6 * g_scale), addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
-    int wd = (int)(520 * g_scale), nameW = (int)(150 * g_scale);
+    int wd = (int)(520 * g_scale), nameW = (int)(90 * g_scale);
     switch (msg) {
     case WM_COMMAND: {
         int id = LOWORD(w), code = HIWORD(w);
