@@ -2448,6 +2448,7 @@ static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
             int xUrl = xName + nameW + (int)(6 * g_scale);
             if (r.hName) MoveWindow(r.hName, xName, yy, nameW, rowEditH, TRUE);
             if (r.hUrl) MoveWindow(r.hUrl, xUrl, yy, contentRight - xUrl, rowEditH, TRUE);
+            else if (r.hLbl) MoveWindow(r.hLbl, xName, yy, contentRight - xName, rowChkH, TRUE);   // 收起态：名称 → 链接 静态文本
             if (r.hRe) MoveWindow(r.hRe, xRe, yy, symW, rowEditH, TRUE);
             if (r.hDel) MoveWindow(r.hDel, wd - mg - symW, yy, symW, rowEditH, TRUE);
             yy += rowEditH + gap;
@@ -2533,6 +2534,8 @@ static void RemoteDlgUnlock(HWND h) {
     SetFocus(st->rows.empty() ? st->hAdd : st->rows[0].hChk);
 }
 // 结束现有行编辑：读入别名/链接（空值回退原值），销毁编辑框、行退回静态文本显示
+// 结束行编辑（现有行/草稿行通用）：读入别名/链接，销毁编辑框、行退回静态文本；空草稿行整行移除
+// 注意：只能从 非编辑框自身消息 的上下文调用（定时器/按钮/弹窗按下），避免销毁正在发通知的编辑框
 static void RemoteRowEndEdit(HWND h, RemoteCfgState* st, RemoteRow& r) {
     auto readEdit = [&](HWND he, std::wstring& out) {
         if (!he) return;
@@ -2544,10 +2547,16 @@ static void RemoteRowEndEdit(HWND h, RemoteCfgState* st, RemoteRow& r) {
     };
     readEdit(r.hName, r.name);
     readEdit(r.hUrl, r.url);
-    if (r.name.empty()) r.name = r.name0;   // 空别名回退原值，防产生空名命令
-    if (r.url.empty()) r.url = r.url0;
     for (HWND hc : { r.hName, r.hUrl }) if (hc) DestroyWindow(hc);
     r.hName = r.hUrl = nullptr;
+    if (!r.existing && r.name.empty() && r.url.empty()) {   // 空草稿行：直接移除，不留空行
+        for (auto it = st->rows.begin(); it != st->rows.end(); ++it)
+            if (&*it == &r) { st->rows.erase(it); break; }
+        RemoteRowsRelayout(h, st);
+        return;
+    }
+    if (r.name.empty()) r.name = r.name0;   // 空别名回退原值，防产生空名命令
+    if (r.url.empty()) r.url = r.url0;
     r.hLbl = CreateWindowExW(0, L"STATIC", (r.name + L" → " + r.url).c_str(), WS_CHILD | WS_VISIBLE,
         0, 0, (int)(10 * g_scale), (int)(10 * g_scale), h, nullptr, g_hInst, nullptr);
     SendMessageW(r.hLbl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
@@ -2561,18 +2570,12 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
     switch (msg) {
     case WM_COMMAND: {
         int id = LOWORD(w), code = HIWORD(w);
-        if (code == EN_KILLFOCUS) {                      // 现有行编辑框失焦：焦点不在本行另一框→立即提交；在→延迟确认（行内切换）
-            int cid = -1;
+        if (code == EN_KILLFOCUS) {                      // 行编辑框失焦（现有/草稿通用）：延迟到定时器再提交——
+            int cid = -1;                                // 销毁正在发通知的编辑框有风险，且要给行内切换留判断窗口
             if (id >= 1100 && id < 1200) cid = id - 1100;
             if (id >= 1200 && id < 1300) cid = id - 1200;
-            for (auto& r : st->rows) {
-                if (r.cid == cid && r.existing && (r.hName || r.hUrl)) {
-                    HWND f = GetFocus();
-                    if (f != r.hName && f != r.hUrl) { RemoteRowEndEdit(h, st, r); return 0; }   // 焦点已离开本行：立即提交
-                    SetTimer(h, 100 + cid, 80, nullptr);   // 行内两框切换：延迟复查（KILLFOCUS 时新框可能尚未拿到焦点）
-                    break;
-                }
-            }
+            for (auto& r : st->rows)
+                if (r.cid == cid && (r.hName || r.hUrl)) { SetTimer(h, 100 + cid, 80, nullptr); break; }
             return 0;
         }
         if (id == 290 && code == BN_CLICKED) {           // ＋添加远端：追加一行（默认不勾选=暂不加入），弹窗加高
@@ -2627,9 +2630,20 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             int cid = id - 1400;
             for (auto& r : st->rows) {
                 if (r.cid != cid) continue;
-                if (!r.existing) {                      // 新增草稿行：清空重填
-                    if (r.hName) { SetWindowTextW(r.hName, L""); SetFocus(r.hName); }
-                    if (r.hUrl) SetWindowTextW(r.hUrl, L"");
+                if (!r.existing) {                      // 新增草稿行：编辑态↔收起态 切换（与现有行一致）
+                    if (r.hName || r.hUrl) RemoteRowEndEdit(h, st, r);   // 已在编辑态：提交并收起
+                    else {                              // 收起态：换回编辑框重填
+                        r.hName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", r.name.c_str(),
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0,
+                            (int)(90 * g_scale), (int)(24 * g_scale), h, (HMENU)(INT_PTR)(1100 + r.cid), g_hInst, nullptr);
+                        r.hUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", r.url.c_str(),
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL, 0, 0,   // 多行去横向自动滚：拖选不抖动
+                            (int)(300 * g_scale), (int)(24 * g_scale), h, (HMENU)(INT_PTR)(1200 + r.cid), g_hInst, nullptr);
+                        SendMessageW(r.hName, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+                        SendMessageW(r.hUrl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+                        RemoteRowsRelayout(h, st);
+                        SetFocus(r.hName);
+                    }
                 } else if (r.hName) {                   // 已在编辑态：提交并退回静态文本
                     RemoteRowEndEdit(h, st, r);
                 } else if (r.hLbl) {                    // 现有远端：静态文本换成 别名+链接 两个编辑框（预填原值）
@@ -2711,21 +2725,24 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
         return 0;
     }
     case WM_LBUTTONDOWN: {
-        // 点弹窗空白处：静态/背景不抢焦点，编辑框收不到 KILLFOCUS——这里强制提交所有编辑中的行
+        // 点弹窗空白处：静态/背景不抢焦点，编辑框收不到 KILLFOCUS——这里强制提交所有编辑中的行（现有/草稿通用）
         bool committed = false;
-        for (auto& r : st->rows)
-            if (r.existing && (r.hName || r.hUrl)) { RemoteRowEndEdit(h, st, r); committed = true; }
+        bool again = true;
+        while (again) {                       // 空草稿行可能整行移除，逐轮提交直到没有编辑中的行
+            again = false;
+            for (auto& r : st->rows)
+                if (r.hName || r.hUrl) { RemoteRowEndEdit(h, st, r); committed = true; again = true; break; }
+        }
         if (committed) InvalidateRect(h, nullptr, TRUE);
         break;   // 交默认处理
     }
     case WM_TIMER: {
-        // 失焦延迟确认：别名框→链接框切换也会触发 KILLFOCUS，定时器到点时检查焦点
-        // 真的离开本行两框才提交；若焦点在另一框（仍在编辑）则不动作
+        // 失焦延迟提交：定时器到点时若该行仍处于编辑态则提交（行内两框间切换也会走这里，
+        // 但焦点已离开本行才会提交；切换到另一框的 KILLFOCUS 会再次设定时器，行内停留不影响）
         for (auto& r : st->rows) {
-            if ((int)w == 100 + r.cid && r.existing && (r.hName || r.hUrl)) {
+            if ((int)w == 100 + r.cid && (r.hName || r.hUrl)) {
                 KillTimer(h, w);
-                HWND f = GetFocus();
-                if (f != r.hName && f != r.hUrl) RemoteRowEndEdit(h, st, r);
+                RemoteRowEndEdit(h, st, r);
                 return 0;
             }
         }
