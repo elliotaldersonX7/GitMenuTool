@@ -2508,8 +2508,8 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
         }
         if (id == IDOK || id == IDCANCEL) {
             if (id == IDOK) {
-                // 读取勾选与新行内容；勾选的现有远端 = 默认远端（行勾选即单选，这里只防全部去勾）
-                int existChecked = 0;
+                // 读取勾选与新行内容；勾选的现有远端 = 默认远端（行勾选即单选）
+                // 允许全部去勾 = 删除所有远端（纯本机开发，无远端也合法）
                 for (auto& r : st->rows) {
                     if (r.hChk) r.checked = SendMessageW(r.hChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
                     auto readEdit = [&](HWND he, std::wstring& out) {
@@ -2521,9 +2521,8 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                     };
                     readEdit(r.hName, r.name);
                     readEdit(r.hUrl, r.url);
-                    if (r.existing && r.checked) { ++existChecked; st->defaultPick = r.name; }
+                    if (r.existing && r.checked) st->defaultPick = r.name;
                 }
-                if (existChecked == 0) { Warn(h, L"至少保留一个远端：请勾选一个作为默认远端（去勾选 = 删除该远端）。"); return 0; }
                 // 校验：勾选的新行必须 本地名+链接 都填，且名字不与保留的默认远端重名
                 bool bad = false;
                 for (auto& r : st->rows) {
