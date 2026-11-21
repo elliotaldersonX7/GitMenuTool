@@ -2414,12 +2414,14 @@ static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
             if (r.hDel) MoveWindow(r.hDel, mg + wd - 2 * mg - (int)(54 * g_scale), yy, (int)(54 * g_scale), rowEditH, TRUE);
             yy += rowChkH + gap;
         } else {
+            int symW = (int)(26 * g_scale), symGap = (int)(4 * g_scale);
+            int xName = mg + (int)(26 * g_scale) + 2 * (symW + symGap) + (int)(2 * g_scale);   // 勾选框 → ✕ → 🖊 → 本地名 → 链接
             if (r.hChk) MoveWindow(r.hChk, mg, yy, (int)(22 * g_scale), rowEditH, TRUE);
-            if (r.hName) MoveWindow(r.hName, mg + (int)(26 * g_scale), yy, nameW, rowEditH, TRUE);
-            if (r.hUrl) MoveWindow(r.hUrl, mg + (int)(26 * g_scale) + nameW + (int)(6 * g_scale), yy,
-                wd - 2 * mg - (int)(26 * g_scale) - nameW - (int)(6 * g_scale) - (int)(118 * g_scale), rowEditH, TRUE);
-            if (r.hDel) MoveWindow(r.hDel, mg + wd - 2 * mg - (int)(112 * g_scale), yy, (int)(54 * g_scale), rowEditH, TRUE);
-            if (r.hRe) MoveWindow(r.hRe, mg + wd - 2 * mg - (int)(55 * g_scale), yy, (int)(54 * g_scale), rowEditH, TRUE);
+            if (r.hDel) MoveWindow(r.hDel, mg + (int)(26 * g_scale), yy, symW, rowEditH, TRUE);
+            if (r.hRe) MoveWindow(r.hRe, mg + (int)(26 * g_scale) + symW + symGap, yy, symW, rowEditH, TRUE);
+            if (r.hName) MoveWindow(r.hName, xName, yy, nameW, rowEditH, TRUE);
+            if (r.hUrl) MoveWindow(r.hUrl, xName + nameW + (int)(6 * g_scale), yy,
+                wd - xName - nameW - (int)(6 * g_scale) - mg, rowEditH, TRUE);
             yy += rowEditH + gap;
         }
     }
@@ -2452,20 +2454,21 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             RemoteRow r;
             r.cid = n;
             r.checked = false;                           // 默认不勾选：勾选=确认加入
+            int symW = (int)(26 * g_scale), symGap = (int)(4 * g_scale);
+            int xName = mg + (int)(26 * g_scale) + 2 * (symW + symGap) + (int)(2 * g_scale);   // 勾选框 → x → 🖊 → 本地名 → 链接
             r.hChk = CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                 mg, st->addY, (int)(22 * g_scale), rowEditH, h, (HMENU)(INT_PTR)(1000 + n), g_hInst, nullptr);
-            r.hName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                mg + (int)(26 * g_scale), st->addY, nameW, rowEditH, h, (HMENU)(INT_PTR)(1100 + n), g_hInst, nullptr);
-            r.hUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                mg + (int)(26 * g_scale) + nameW + (int)(6 * g_scale), st->addY,
-                wd - 2 * mg - (int)(26 * g_scale) - nameW - (int)(6 * g_scale) - (int)(118 * g_scale), rowEditH, h,
-                (HMENU)(INT_PTR)(1200 + n), g_hInst, nullptr);
-            r.hDel = CreateWindowExW(0, L"BUTTON", L"删除", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                mg + wd - 2 * mg - (int)(112 * g_scale), st->addY, (int)(54 * g_scale), rowEditH, h,
-                (HMENU)(INT_PTR)(1300 + n), g_hInst, nullptr);
-            r.hRe = CreateWindowExW(0, L"BUTTON", L"重编辑", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                mg + wd - 2 * mg - (int)(55 * g_scale), st->addY, (int)(54 * g_scale), rowEditH, h,
+            r.hDel = CreateWindowExW(0, L"BUTTON", L"✕", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                mg + (int)(26 * g_scale), st->addY, symW, rowEditH, h, (HMENU)(INT_PTR)(1300 + n), g_hInst, nullptr);
+            r.hRe = CreateWindowExW(0, L"BUTTON", L"🖊", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                mg + (int)(26 * g_scale) + symW + symGap, st->addY, symW, rowEditH, h,
                 (HMENU)(INT_PTR)(1400 + n), g_hInst, nullptr);
+            r.hName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                xName, st->addY, nameW, rowEditH, h, (HMENU)(INT_PTR)(1100 + n), g_hInst, nullptr);
+            r.hUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                xName + nameW + (int)(6 * g_scale), st->addY,
+                wd - xName - nameW - (int)(6 * g_scale) - mg, rowEditH, h,
+                (HMENU)(INT_PTR)(1200 + n), g_hInst, nullptr);
             SendMessageW(r.hChk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
             SendMessageW(r.hName, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
             SendMessageW(r.hUrl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
