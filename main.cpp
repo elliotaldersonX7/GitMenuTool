@@ -2388,11 +2388,11 @@ static void OpInitRepo() {
 struct RemoteRow {
     std::wstring name, url;
     bool existing = false, checked = true;
-    bool del = false;                             // 现有远端被行内【删除】标记：OK 时执行 remote remove（去勾选≠删除）
+    bool del = false;                             // 现有远端被行内【✕】标记：OK 时执行 remote remove（去勾选≠删除）
     int cid = -1;                                 // 行创建序号（删除/重编辑按钮定位用，新旧行统一）
-    int chkW = 0;                                 // 现有远端勾选框宽度（文字实测，命中区只含方框+文字）
     HWND hChk = nullptr, hName = nullptr, hUrl = nullptr;
-    HWND hDel = nullptr, hRe = nullptr;           // 删除（新旧行都有）/重编辑（新增行专有）
+    HWND hDel = nullptr, hRe = nullptr;           // ✕ 删除（新旧行都有）/ 🖊 重编辑（新增行专有）
+    HWND hLbl = nullptr;                          // 现有远端行的 "名称 → 链接" 文本（勾选框只留小方框，命中区不含长文本）
 };
 struct RemoteCfgState {
     std::vector<RemoteRow> rows;
@@ -2407,15 +2407,17 @@ static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
     int gap = (int)(6 * g_scale), hintH = (int)(18 * g_scale), addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
     int wd = (int)(520 * g_scale), nameW = (int)(90 * g_scale);
+    int symW = (int)(26 * g_scale), symGap = (int)(4 * g_scale);   // ✕/🖊 符号按钮统一尺寸
     int yy = mg + hintH + (int)(4 * g_scale);
     for (auto& r : st->rows) {
         if (r.existing) {
             if (r.del) continue;                        // 已标记删除的行不占位
-            if (r.hChk) MoveWindow(r.hChk, mg, yy, r.chkW, rowChkH, TRUE);
-            if (r.hDel) MoveWindow(r.hDel, mg + wd - 2 * mg - (int)(54 * g_scale), yy, (int)(54 * g_scale), rowEditH, TRUE);
+            if (r.hChk) MoveWindow(r.hChk, mg, yy, (int)(22 * g_scale), rowChkH, TRUE);
+            if (r.hDel) MoveWindow(r.hDel, mg + (int)(26 * g_scale), yy, symW, rowEditH, TRUE);
+            if (r.hLbl) MoveWindow(r.hLbl, mg + (int)(26 * g_scale) + symW + symGap, yy,
+                wd - 2 * mg - (int)(26 * g_scale) - symW - symGap, rowChkH, TRUE);
             yy += rowChkH + gap;
         } else {
-            int symW = (int)(26 * g_scale), symGap = (int)(4 * g_scale);
             int xName = mg + (int)(26 * g_scale) + 2 * (symW + symGap) + (int)(2 * g_scale);   // 勾选框 → ✕ → 🖊 → 本地名 → 链接
             if (r.hChk) MoveWindow(r.hChk, mg, yy, (int)(22 * g_scale), rowEditH, TRUE);
             if (r.hDel) MoveWindow(r.hDel, mg + (int)(26 * g_scale), yy, symW, rowEditH, TRUE);
@@ -2483,7 +2485,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             int cid = id - 1300;
             for (auto it = st->rows.begin(); it != st->rows.end(); ++it) {
                 if (it->cid == cid) {
-                    for (HWND hc : { it->hChk, it->hName, it->hUrl, it->hDel, it->hRe })
+                    for (HWND hc : { it->hChk, it->hName, it->hUrl, it->hDel, it->hRe, it->hLbl })
                         if (hc) DestroyWindow(hc);
                     if (it->existing) it->del = true;    // 现有远端：标记删除，OK 时执行 remote remove（去勾选≠删除）
                     else st->rows.erase(it);             // 新增草稿行：直接移除
@@ -2588,28 +2590,25 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
     SetWindowSubclass(dlg, RemoteCfgDlgSub, 1, (DWORD_PTR)&st);
     HWND hHint = CreateWindowExW(0, L"STATIC",
         locked ? L"有远端操作进行中，完成后才能配置远端（当前内容只读）："
-               : L"勾选一个作为默认远端（可不勾选，纯本机开发）；去勾选仅取消默认，删除远端请点行内【删除】：",
+               : L"勾选一个作为默认远端（可不勾选，纯本机开发）；去勾选仅取消默认，点行内 ✕ 删除该远端：",
         WS_CHILD | WS_VISIBLE, mg, mg, w - 2 * mg, hintH, dlg, nullptr, g_hInst, nullptr);
     SendMessageW(hHint, WM_SETFONT, (WPARAM)g_fontMenu, TRUE);
     int yy = mg + hintH + (int)(4 * g_scale);
+    int symW = (int)(26 * g_scale), symGap = (int)(4 * g_scale);
     bool preMatch = false;
     for (size_t i = 0; i < st.rows.size(); ++i) {
         RemoteRow& r = st.rows[i];
         std::wstring label = r.name + L" → " + (r.url.empty() ? L"（未取到链接）" : r.url);
-        HDC dc = GetDC(dlg);                        // 勾选框宽度=文字实测+方框余量：命中区只在方框与文字内，行内其它位置点击不切换
-        HFONT of = (HFONT)SelectObject(dc, g_fontUI);
-        SIZE sz; GetTextExtentPoint32W(dc, label.c_str(), (int)label.size(), &sz);
-        SelectObject(dc, of); ReleaseDC(dlg, dc);
-        int cw = sz.cx + (int)(26 * g_scale);
-        if (cw > w - 2 * mg - (int)(60 * g_scale)) cw = w - 2 * mg - (int)(60 * g_scale);   // 超长链接截断，右侧留删除按钮位
-        r.chkW = cw;
-        r.hChk = CreateWindowExW(0, L"BUTTON", label.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            mg, yy, cw, rowChkH, dlg, (HMENU)(INT_PTR)(400 + (int)i), g_hInst, nullptr);
-        r.hDel = CreateWindowExW(0, L"BUTTON", L"删除", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            mg + w - 2 * mg - (int)(54 * g_scale), yy, (int)(54 * g_scale), rowEditH, dlg,
-            (HMENU)(INT_PTR)(1300 + (int)i), g_hInst, nullptr);   // 现有远端显式删除：OK 时才执行 remote remove
-        SendMessageW(r.hDel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+        r.hChk = CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            mg, yy, (int)(22 * g_scale), rowChkH, dlg, (HMENU)(INT_PTR)(400 + (int)i), g_hInst, nullptr);
+        r.hDel = CreateWindowExW(0, L"BUTTON", L"✕", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            mg + (int)(26 * g_scale), yy, symW, rowEditH, dlg, (HMENU)(INT_PTR)(1300 + (int)i), g_hInst, nullptr);
+        r.hLbl = CreateWindowExW(0, L"STATIC", label.c_str(), WS_CHILD | WS_VISIBLE,
+            mg + (int)(26 * g_scale) + symW + symGap, yy, w - 2 * mg - (int)(26 * g_scale) - symW - symGap, rowChkH,
+            dlg, nullptr, g_hInst, nullptr);
         SendMessageW(r.hChk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+        SendMessageW(r.hDel, WM_SETFONT, (WPARAM)g_fontSym, TRUE);   // ✕ 须用 Segoe UI Symbol（YaHei 无字形画空白）
+        SendMessageW(r.hLbl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
         bool pre = (r.name == defaultPick);
         if (pre) preMatch = true;
         SendMessageW(r.hChk, BM_SETCHECK, pre ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -2628,7 +2627,7 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
         SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
     if (locked) {   // 有远端操作进行中：全部内容置灰不可选，仅 Cancel 可关闭弹窗
         for (auto& r : st.rows)
-            for (HWND hc : { r.hChk, r.hName, r.hUrl, r.hDel, r.hRe })
+            for (HWND hc : { r.hChk, r.hName, r.hUrl, r.hDel, r.hRe, r.hLbl })
                 if (hc) EnableWindow(hc, FALSE);
         EnableWindow(st.hAdd, FALSE);
         EnableWindow(st.hOk, FALSE);
