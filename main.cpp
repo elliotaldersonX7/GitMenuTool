@@ -2561,12 +2561,18 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
     switch (msg) {
     case WM_COMMAND: {
         int id = LOWORD(w), code = HIWORD(w);
-        if (code == EN_KILLFOCUS) {                      // 现有行编辑框失焦：延迟确认焦点真的离开本行 → 自动提交退回静态文本
+        if (code == EN_KILLFOCUS) {                      // 现有行编辑框失焦：焦点不在本行另一框→立即提交；在→延迟确认（行内切换）
             int cid = -1;
             if (id >= 1100 && id < 1200) cid = id - 1100;
             if (id >= 1200 && id < 1300) cid = id - 1200;
-            for (auto& r : st->rows)
-                if (r.cid == cid && r.existing && (r.hName || r.hUrl)) { SetTimer(h, 100 + cid, 80, nullptr); break; }
+            for (auto& r : st->rows) {
+                if (r.cid == cid && r.existing && (r.hName || r.hUrl)) {
+                    HWND f = GetFocus();
+                    if (f != r.hName && f != r.hUrl) { RemoteRowEndEdit(h, st, r); return 0; }   // 焦点已离开本行：立即提交
+                    SetTimer(h, 100 + cid, 80, nullptr);   // 行内两框切换：延迟复查（KILLFOCUS 时新框可能尚未拿到焦点）
+                    break;
+                }
+            }
             return 0;
         }
         if (id == 290 && code == BN_CLICKED) {           // ＋添加远端：追加一行（默认不勾选=暂不加入），弹窗加高
@@ -2617,14 +2623,16 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             }
             return 0;
         }
-        if (id >= 1400 && id < 1400 + (int)st->rows.size() + 20 && code == BN_CLICKED) {   // 🖊 重编辑
+        if (id >= 1400 && id < 1400 + (int)st->rows.size() + 20 && code == BN_CLICKED) {   // 🖊 重编辑（再点一次=提交并退出编辑态）
             int cid = id - 1400;
             for (auto& r : st->rows) {
                 if (r.cid != cid) continue;
                 if (!r.existing) {                      // 新增草稿行：清空重填
                     if (r.hName) { SetWindowTextW(r.hName, L""); SetFocus(r.hName); }
                     if (r.hUrl) SetWindowTextW(r.hUrl, L"");
-                } else if (r.hLbl && !r.hName) {        // 现有远端：静态文本换成 别名+链接 两个编辑框（预填原值）
+                } else if (r.hName) {                   // 已在编辑态：提交并退回静态文本
+                    RemoteRowEndEdit(h, st, r);
+                } else if (r.hLbl) {                    // 现有远端：静态文本换成 别名+链接 两个编辑框（预填原值）
                     DestroyWindow(r.hLbl);
                     r.hLbl = nullptr;
                     r.hName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", r.name.c_str(),
