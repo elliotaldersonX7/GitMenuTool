@@ -2203,10 +2203,14 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs(bool force = false) {
         lines->push_back({ SegT(L"未提交：", STAT_TXT, true), SegT(L" " + std::to_wstring(nTotal) + L" ", STAT_ORG, false, BG_YLW) });
     else
         lines->push_back({ SegT(L"未提交：", STAT_TXT, true), SegT(L" 0 ", STAT_GRN, false, BG_GRN) });
-    // 已提交（本地 vs 勾选远端）：同步 绿色；本地领先(x)/远端领先(x) 橙色（真分叉才并列）
+    // 先取标签差异（含远端可达性 netOk）：已提交行的对比也以它为准——远端未知时两者都显示未知，不基于本地缓存的旧 tracking 数据下结论
+    TagDiff td = ComputeTagDiff(force);
+    // 已提交（本地 vs 勾选远端）：同步 绿色；本地领先(x)/远端领先(x) 橙色（真分叉才并列）；远端未知 灰色
     std::vector<Seg> cm = { SegT(L"已提交：", STAT_TXT, true) };
     if (g_remote.empty()) {
         cm.push_back(SegT(L"无默认远端", STAT_DIM));   // 未勾选默认远端：没有比较对象，不显示"同步"
+    } else if (!td.netOk) {
+        cm.push_back(SegT(L"未知（网络不可达，可配置代理）", STAT_DIM));   // 远端状态未知：ahead/behind 基于本地旧缓存，不下结论
     } else if (!upstream.empty()) {
         if (ahead > 0 && behind > 0) {
             cm.push_back(SegT(L" 本地领先（" + std::to_wstring(ahead) + L"） ", STAT_ORG, false, BG_YLW));
@@ -2222,8 +2226,7 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs(bool force = false) {
         cm.push_back(SegT(L"无上游跟踪", STAT_DIM));
     }
     lines->push_back(cm);
-    // 本地tag VS 远端tag：本地最新：xxx 远端最新：xxx
-    TagDiff td = ComputeTagDiff(force);
+    // 标签：本地最新 vs 远端最新
     std::vector<Seg> tg = { SegT(L"标签：", STAT_TXT, true) };
     // 相同→双方绿色；不同→领先方橙色、落后方灰色
     bool same = (td.localLatest == td.remoteLatest);
