@@ -2496,9 +2496,19 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             }
             return 0;
         }
+        if (id >= 400 && id < 400 + (int)st->rows.size() && code == BN_CLICKED) {   // 现有远端行：勾谁谁是默认远端（单选）——勾选某行时自动取消其它行勾选
+            int idx = id - 400;
+            if (idx < (int)st->rows.size() && st->rows[idx].existing
+                && SendMessageW(st->rows[idx].hChk, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                for (auto& r : st->rows)
+                    if (r.existing && r.hChk && &r != &st->rows[idx])
+                        SendMessageW(r.hChk, BM_SETCHECK, BST_UNCHECKED, 0);
+            }
+            return 0;
+        }
         if (id == IDOK || id == IDCANCEL) {
             if (id == IDOK) {
-                // 读取勾选与新行内容；勾选的现有远端 = 默认远端（只能一个），去勾选 = OK 时删除
+                // 读取勾选与新行内容；勾选的现有远端 = 默认远端（行勾选即单选，这里只防全部去勾）
                 int existChecked = 0;
                 for (auto& r : st->rows) {
                     if (r.hChk) r.checked = SendMessageW(r.hChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -2514,7 +2524,6 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                     if (r.existing && r.checked) { ++existChecked; st->defaultPick = r.name; }
                 }
                 if (existChecked == 0) { Warn(h, L"至少保留一个远端：请勾选一个作为默认远端（去勾选 = 删除该远端）。"); return 0; }
-                if (existChecked > 1) { Warn(h, L"默认远端只能勾选一个（其余请去勾选删除）。"); return 0; }
                 // 校验：勾选的新行必须 本地名+链接 都填，且名字不与保留的默认远端重名
                 bool bad = false;
                 for (auto& r : st->rows) {
@@ -2537,8 +2546,9 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
     }
     return DefSubclassProc(h, msg, w, l);
 }
-// 配置远程弹窗：勾选行=默认远端(只能一个)+保留，去勾选=删除；【＋添加远端】动态行；返回 rows 供调用方统一生成命令
-static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPick) {
+// 配置远程弹窗：勾选行=默认远端(单选，勾选自动互斥)+保留，去勾选=删除；【＋添加远端】动态行；
+// locked=true（有远端操作进行中）时全部内容置灰只读，仅 Cancel 可关；返回 rows 供调用方统一生成命令
+static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPick, bool locked) {
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), gap = (int)(6 * g_scale);
     int hintH = (int)(18 * g_scale);
     int addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
@@ -2564,16 +2574,23 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
     st.hDlg = dlg;
     SetWindowSubclass(dlg, RemoteCfgDlgSub, 1, (DWORD_PTR)&st);
     HWND hHint = CreateWindowExW(0, L"STATIC",
-        L"勾选一个作为默认远端（推送/拉取使用的）；去勾选 = OK 时删除该远端：", WS_CHILD | WS_VISIBLE,
-        mg, mg, w - 2 * mg, hintH, dlg, nullptr, g_hInst, nullptr);
+        locked ? L"有远端操作进行中，完成后才能配置远端（当前内容只读）："
+               : L"勾选一个作为默认远端（推送/拉取使用的）；去勾选 = OK 时删除该远端：",
+        WS_CHILD | WS_VISIBLE, mg, mg, w - 2 * mg, hintH, dlg, nullptr, g_hInst, nullptr);
     SendMessageW(hHint, WM_SETFONT, (WPARAM)g_fontMenu, TRUE);
     int yy = mg + hintH + (int)(4 * g_scale);
     bool preMatch = false;
     for (size_t i = 0; i < st.rows.size(); ++i) {
         RemoteRow& r = st.rows[i];
         std::wstring label = r.name + L" → " + (r.url.empty() ? L"（未取到链接）" : r.url);
+        HDC dc = GetDC(dlg);                        // 勾选框宽度=文字实测+方框余量：命中区只在方框与文字内，行内其它位置点击不切换
+        HFONT of = (HFONT)SelectObject(dc, g_fontUI);
+        SIZE sz; GetTextExtentPoint32W(dc, label.c_str(), (int)label.size(), &sz);
+        SelectObject(dc, of); ReleaseDC(dlg, dc);
+        int cw = sz.cx + (int)(26 * g_scale);
+        if (cw > w - 2 * mg) cw = w - 2 * mg;       // 超长链接截到行宽
         r.hChk = CreateWindowExW(0, L"BUTTON", label.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            mg, yy, w - 2 * mg, rowChkH, dlg, (HMENU)(INT_PTR)(400 + (int)i), g_hInst, nullptr);
+            mg, yy, cw, rowChkH, dlg, (HMENU)(INT_PTR)(400 + (int)i), g_hInst, nullptr);
         SendMessageW(r.hChk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
         bool pre = (r.name == defaultPick);
         if (pre) preMatch = true;
@@ -2591,9 +2608,16 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
         w - (int)(80 * g_scale) - mg, by, (int)(80 * g_scale), btnH, dlg, (HMENU)IDCANCEL, g_hInst, nullptr);
     for (HWND c : { st.hAdd, st.hOk, st.hCancel })
         SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+    if (locked) {   // 有远端操作进行中：全部内容置灰不可选，仅 Cancel 可关闭弹窗
+        for (auto& r : st.rows)
+            for (HWND hc : { r.hChk, r.hName, r.hUrl, r.hDel, r.hRe })
+                if (hc) EnableWindow(hc, FALSE);
+        EnableWindow(st.hAdd, FALSE);
+        EnableWindow(st.hOk, FALSE);
+    }
     EnableWindow(parent, FALSE);
     ShowWindow(dlg, SW_SHOW);
-    SetFocus(nExist ? st.rows[0].hChk : st.hAdd);
+    SetFocus(locked ? st.hCancel : (nExist ? st.rows[0].hChk : st.hAdd));
     MSG msg;
     while (!st.done && GetMessageW(&msg, nullptr, 0, 0)) {
         if (IsDialogMessageW(dlg, &msg)) continue;
@@ -2608,7 +2632,7 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
 // 配置远程：OK 后统一生成命令——去勾选的现有远端删除，勾选的新行 remote add；默认远端变更写仓库级配置
 static void OpRemoteCfg() {
     std::wstring defaultPick = g_remote;
-    auto rows = AskRemoteCfg(g_main, defaultPick);
+    auto rows = AskRemoteCfg(g_main, defaultPick, g_busy);   // g_busy=远端操作进行中：弹窗只读，OK 禁用必然走 Cancel 无命令
     std::vector<std::vector<std::wstring>> cmds;
     for (auto& r : rows) {
         if (r.existing && !r.checked)
