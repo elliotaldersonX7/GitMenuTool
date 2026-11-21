@@ -2298,7 +2298,7 @@ static std::wstring RemoteFromUrl(const std::wstring& url) {
 // ============================ 各操作 ========================================
 static void OpStatus()      { Exec({ G({ L"status" }) }); }
 static void OpDiff()        { Exec({ G({ L"diff" }), G({ L"diff", L"--staged" }) }); }
-static void OpPull()        { if (!EnsureRepo() || NeedRemote() || NeedCommit() || NeedBranch()) return; Exec({ G({ L"pull", L"--no-edit" }) }); }
+static void OpPull()        { if (!EnsureRepo() || NeedRemote() || NeedCommit() || NeedBranch()) return; Exec({ G({ L"pull", L"--no-edit", g_remote, CurBranch() }) }); }   // 显式拉自勾选的默认远端（裸 git pull 走上游跟踪的远端）
 static void OpTagList()     { Exec({ G({ L"tag", L"-l" }) }); }
 static void OpTagPush()     { if (NeedRemote()) return; Exec({ G({ L"push", g_remote, L"--tags" }) }); }
 static void OpRemoteInfo()  { if (NeedRemote()) return; Exec({ G({ L"remote", L"-v" }), G({ L"branch", L"-vv" }) }); }
@@ -2330,7 +2330,6 @@ static void OpShow() {
 // 推送核心序列（推送按钮共用）：无上游→fetch 后检查无关历史并询问强推
 static void DoPushCore() {
     if (!EnsureRepo() || NeedRemote() || NeedCommit() || NeedBranch()) return;
-    std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
     std::wstring br = CurBranch();
     GitOut({ L"fetch", L"--quiet", g_remote }, 120000);
     std::wstring head = Trim(GitOut({ L"rev-parse", L"HEAD" }));
@@ -2346,18 +2345,15 @@ static void DoPushCore() {
         } else {
             cmds.push_back(G({ L"push", L"-u", g_remote, br }));
         }
-    } else if (up.empty()) {
-        cmds.push_back(G({ L"push", L"-u", g_remote, br }));
     } else {
-        cmds.push_back(G({ L"push" }));
+        // 一律显式推到勾选的默认远端：裸 git push 走上游跟踪的远端，勾选就形同虚设；-u 顺带把跟踪关系切到勾选的远端
+        cmds.push_back(G({ L"push", L"-u", g_remote, br }));
     }
     ExecV(cmds);
 }
 static void OpPush() {
     if (!EnsureRepo() || NeedRemote() || NeedBranch()) return;
-    std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
-    if (!up.empty()) { Exec({ G({ L"push" }) }); return; }
-    DoPushCore();
+    DoPushCore();   // 一律走 DoPushCore 显式推到勾选的默认远端（裸 git push 走上游跟踪，勾选无效）
 }
 /**
   ******************************************************************************
@@ -2378,9 +2374,7 @@ static void OpForcePush() {
     auto y = AskText(g_main, L"强制推送（危险操作）", note);
     if (!y || *y != L"Y") return;
     OutSep(); OutCmd(L"强制推送: " + br);
-    std::wstring up = Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
-    if (!up.empty()) Exec({ G({ L"push", L"--force" }) });
-    else             Exec({ G({ L"push", L"-u", g_remote, br, L"--force" }) });
+    Exec({ G({ L"push", L"-u", g_remote, br, L"--force" }) });   // 显式推到勾选的默认远端（裸 git push --force 会走上游跟踪的远端）
 }
 static void OpInitRepo() {
     if (!EnsureRepo()) return;
