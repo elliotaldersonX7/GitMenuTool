@@ -2387,9 +2387,11 @@ static void OpInitRepo() {
 struct RemoteRow {
     std::wstring name, url;
     bool existing = false, checked = true;
-    int cid = -1;                                 // 新增行的创建序号（删除/重编辑按钮定位用）
+    bool del = false;                             // 现有远端被行内【删除】标记：OK 时执行 remote remove（去勾选≠删除）
+    int cid = -1;                                 // 行创建序号（删除/重编辑按钮定位用，新旧行统一）
+    int chkW = 0;                                 // 现有远端勾选框宽度（文字实测，命中区只含方框+文字）
     HWND hChk = nullptr, hName = nullptr, hUrl = nullptr;
-    HWND hDel = nullptr, hRe = nullptr;           // 新增行专有：删除/重编辑按钮
+    HWND hDel = nullptr, hRe = nullptr;           // 删除（新旧行都有）/重编辑（新增行专有）
 };
 struct RemoteCfgState {
     std::vector<RemoteRow> rows;
@@ -2407,7 +2409,9 @@ static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
     int yy = mg + hintH + (int)(4 * g_scale);
     for (auto& r : st->rows) {
         if (r.existing) {
-            if (r.hChk) MoveWindow(r.hChk, mg, yy, wd - 2 * mg, rowChkH, TRUE);
+            if (r.del) continue;                        // 已标记删除的行不占位
+            if (r.hChk) MoveWindow(r.hChk, mg, yy, r.chkW, rowChkH, TRUE);
+            if (r.hDel) MoveWindow(r.hDel, mg + wd - 2 * mg - (int)(54 * g_scale), yy, (int)(54 * g_scale), rowEditH, TRUE);
             yy += rowChkH + gap;
         } else {
             if (r.hChk) MoveWindow(r.hChk, mg, yy, (int)(22 * g_scale), rowEditH, TRUE);
@@ -2471,13 +2475,14 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             RemoteRowsRelayout(h, st);
             return 0;
         }
-        if (id >= 1300 && id < 1300 + (int)st->rows.size() + 20 && code == BN_CLICKED) {   // 删除该行（新增行专用）
+        if (id >= 1300 && id < 1300 + (int)st->rows.size() + 20 && code == BN_CLICKED) {   // 删除该行（新旧行统一按 cid 定位）
             int cid = id - 1300;
             for (auto it = st->rows.begin(); it != st->rows.end(); ++it) {
-                if (!it->existing && it->cid == cid) {
+                if (it->cid == cid) {
                     for (HWND hc : { it->hChk, it->hName, it->hUrl, it->hDel, it->hRe })
                         if (hc) DestroyWindow(hc);
-                    st->rows.erase(it);
+                    if (it->existing) it->del = true;    // 现有远端：标记删除，OK 时执行 remote remove（去勾选≠删除）
+                    else st->rows.erase(it);             // 新增草稿行：直接移除
                     RemoteRowsRelayout(h, st);
                     return 0;
                 }
@@ -2498,7 +2503,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
         }
         if (id >= 400 && id < 400 + (int)st->rows.size() && code == BN_CLICKED) {   // 现有远端行：勾谁谁是默认远端（单选）——勾选某行时自动取消其它行勾选
             int idx = id - 400;
-            if (idx < (int)st->rows.size() && st->rows[idx].existing
+            if (idx < (int)st->rows.size() && st->rows[idx].existing && st->rows[idx].hChk
                 && SendMessageW(st->rows[idx].hChk, BM_GETCHECK, 0, 0) == BST_CHECKED) {
                 for (auto& r : st->rows)
                     if (r.existing && r.hChk && &r != &st->rows[idx])
@@ -2509,7 +2514,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
         if (id == IDOK || id == IDCANCEL) {
             if (id == IDOK) {
                 // 读取勾选与新行内容；勾选的现有远端 = 默认远端（行勾选即单选）
-                // 允许全部去勾 = 删除所有远端（纯本机开发，无远端也合法）
+                // 去勾选≠删除：远端保留，仅不作为默认；删除只认行内【删除】按钮标记的 del
                 for (auto& r : st->rows) {
                     if (r.hChk) r.checked = SendMessageW(r.hChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
                     auto readEdit = [&](HWND he, std::wstring& out) {
@@ -2521,7 +2526,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                     };
                     readEdit(r.hName, r.name);
                     readEdit(r.hUrl, r.url);
-                    if (r.existing && r.checked) st->defaultPick = r.name;
+                    if (r.existing && r.checked && !r.del) st->defaultPick = r.name;
                 }
                 // 校验：勾选的新行必须 本地名+链接 都填，且名字不与保留的默认远端重名
                 bool bad = false;
@@ -2549,7 +2554,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
 // locked=true（有远端操作进行中）时全部内容置灰只读，仅 Cancel 可关；返回 rows 供调用方统一生成命令
 static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPick, bool locked) {
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), gap = (int)(6 * g_scale);
-    int hintH = (int)(18 * g_scale);
+    int hintH = (int)(18 * g_scale), rowEditH = (int)(24 * g_scale);
     int addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
     int w = (int)(520 * g_scale);
     RemoteCfgState st;
@@ -2557,8 +2562,13 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
         std::wstring nm = Trim(l);
         if (nm.empty()) continue;
         std::wstring url = Trim(GitOut({ L"config", L"--get", L"remote." + nm + L".url" }));
-        st.rows.push_back({ nm, url, true, true, -1, nullptr, nullptr, nullptr, nullptr, nullptr });
+        RemoteRow rr;
+        rr.name = nm; rr.url = url;
+        rr.existing = true; rr.checked = true;
+        rr.cid = (int)st.rows.size();               // 现有行 cid = 建行顺序（弹窗期间行不删除只标记，id 稳定）
+        st.rows.push_back(std::move(rr));
     }
+    st.nextIdx = (int)st.rows.size();               // 新增行 cid 接在现有行之后，1300+cid 删除按钮 id 不冲突
     int nExist = (int)st.rows.size();
     st.addY = mg + hintH + (int)(4 * g_scale) + nExist * (rowChkH + gap);
     st.ch = st.addY + addH + (int)(12 * g_scale) + btnH + mg;
@@ -2574,7 +2584,7 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
     SetWindowSubclass(dlg, RemoteCfgDlgSub, 1, (DWORD_PTR)&st);
     HWND hHint = CreateWindowExW(0, L"STATIC",
         locked ? L"有远端操作进行中，完成后才能配置远端（当前内容只读）："
-               : L"勾选一个作为默认远端（推送/拉取使用的）；去勾选 = OK 时删除该远端：",
+               : L"勾选一个作为默认远端（可不勾选，纯本机开发）；去勾选仅取消默认，删除远端请点行内【删除】：",
         WS_CHILD | WS_VISIBLE, mg, mg, w - 2 * mg, hintH, dlg, nullptr, g_hInst, nullptr);
     SendMessageW(hHint, WM_SETFONT, (WPARAM)g_fontMenu, TRUE);
     int yy = mg + hintH + (int)(4 * g_scale);
@@ -2587,9 +2597,14 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
         SIZE sz; GetTextExtentPoint32W(dc, label.c_str(), (int)label.size(), &sz);
         SelectObject(dc, of); ReleaseDC(dlg, dc);
         int cw = sz.cx + (int)(26 * g_scale);
-        if (cw > w - 2 * mg) cw = w - 2 * mg;       // 超长链接截到行宽
+        if (cw > w - 2 * mg - (int)(60 * g_scale)) cw = w - 2 * mg - (int)(60 * g_scale);   // 超长链接截断，右侧留删除按钮位
+        r.chkW = cw;
         r.hChk = CreateWindowExW(0, L"BUTTON", label.c_str(), WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             mg, yy, cw, rowChkH, dlg, (HMENU)(INT_PTR)(400 + (int)i), g_hInst, nullptr);
+        r.hDel = CreateWindowExW(0, L"BUTTON", L"删除", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            mg + w - 2 * mg - (int)(54 * g_scale), yy, (int)(54 * g_scale), rowEditH, dlg,
+            (HMENU)(INT_PTR)(1300 + (int)i), g_hInst, nullptr);   // 现有远端显式删除：OK 时才执行 remote remove
+        SendMessageW(r.hDel, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
         SendMessageW(r.hChk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
         bool pre = (r.name == defaultPick);
         if (pre) preMatch = true;
@@ -2628,14 +2643,14 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
     defaultPick = st.defaultPick;   // 勾选的那个远端 = 默认远端（校验已保证有且只有一个）
     return st.rows;
 }
-// 配置远程：OK 后统一生成命令——去勾选的现有远端删除，勾选的新行 remote add；默认远端变更写仓库级配置
+// 配置远程：OK 后统一生成命令——行内【删除】标记的现有远端 remote remove，勾选的新行 remote add；默认远端变更写仓库级配置
 static void OpRemoteCfg() {
     std::wstring defaultPick = g_remote;
     auto rows = AskRemoteCfg(g_main, defaultPick, g_busy);   // g_busy=远端操作进行中：弹窗只读，OK 禁用必然走 Cancel 无命令
     std::vector<std::vector<std::wstring>> cmds;
     for (auto& r : rows) {
-        if (r.existing && !r.checked)
-            cmds.push_back(G({ L"remote", L"remove", r.name }));
+        if (r.existing && r.del)
+            cmds.push_back(G({ L"remote", L"remove", r.name }));   // 仅显式【删除】才删；去勾选只是取消默认
         else if (!r.existing && r.checked && !r.name.empty() && !r.url.empty())
             cmds.push_back(G({ L"remote", L"add", r.name, r.url }));
     }
