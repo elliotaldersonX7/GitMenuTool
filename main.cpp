@@ -2858,7 +2858,8 @@ static void OpRemoteCfg() {
     }
     if (cmds.empty()) return;
     ExecAsync(std::move(cmds));
-    RefreshStatusAsync();   // 默认远端可能变化（被删/新增/手动选择），立即刷新
+    // 刷新交给 WM_APP_JOBDONE（全部命令含默认远端配置写入完成后再刷）：
+    // 这里立刻刷新会抢在配置写入前读到旧值，出现"勾选了远端却显示未配置"的竞态
 }
 static void OpTagNew() {
     if (!EnsureRepo()) return;
