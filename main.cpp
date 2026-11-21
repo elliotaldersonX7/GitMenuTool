@@ -2397,8 +2397,9 @@ struct RemoteRow {
 };
 struct RemoteCfgState {
     std::vector<RemoteRow> rows;
-    HWND hDlg = nullptr, hAdd = nullptr, hOk = nullptr, hCancel = nullptr;
+    HWND hDlg = nullptr, hAdd = nullptr, hOk = nullptr, hCancel = nullptr, hHint = nullptr;
     std::wstring defaultPick;             // OK 时勾选的那个远端 = 默认远端（只能勾一个）
+    std::wstring initPick;                // 打开时的默认远端（事件解锁重建行时预勾用）
     int addY = 0, ch = 0, nextIdx = 0;
     bool done = false;
 };
@@ -2448,6 +2449,76 @@ static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
     SetWindowPos(h, nullptr, 0, 0, fr.right - fr.left, fr.bottom - fr.top + (st->ch - oldCh),
                  SWP_NOMOVE | SWP_NOZORDER);
     InvalidateRect(h, nullptr, FALSE);
+}
+// 建现有远端行控件（首次创建与事件解锁刷新共用）；rows 数据须已就位，建完由 RemoteRowsRelayout 统一摆位
+static void RemoteDlgBuildRows(HWND dlg, RemoteCfgState* st) {
+    int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
+    int w = (int)(520 * g_scale);
+    int symW = (int)(26 * g_scale), symGap = (int)(4 * g_scale);
+    int xRe = w - mg - 2 * (symW + symGap);
+    bool preMatch = false;
+    for (size_t i = 0; i < st->rows.size(); ++i) {
+        RemoteRow& r = st->rows[i];
+        std::wstring label = r.name + L" → " + (r.url.empty() ? L"（未取到链接）" : r.url);
+        r.hChk = CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            mg, (int)(100 * g_scale) + (int)i * rowChkH, (int)(22 * g_scale), rowChkH, dlg,
+            (HMENU)(INT_PTR)(400 + (int)i), g_hInst, nullptr);
+        r.hRe = CreateWindowExW(0, L"BUTTON", L"🖊", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            xRe, (int)(100 * g_scale) + (int)i * rowChkH, symW, rowEditH, dlg,
+            (HMENU)(INT_PTR)(1400 + (int)i), g_hInst, nullptr);
+        r.hDel = CreateWindowExW(0, L"BUTTON", L"✕", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            w - mg - symW, (int)(100 * g_scale) + (int)i * rowChkH, symW, rowEditH, dlg,
+            (HMENU)(INT_PTR)(1300 + (int)i), g_hInst, nullptr);
+        r.hLbl = CreateWindowExW(0, L"STATIC", label.c_str(), WS_CHILD | WS_VISIBLE,
+            mg + (int)(26 * g_scale), (int)(100 * g_scale) + (int)i * rowChkH,
+            xRe - symGap - mg - (int)(26 * g_scale), rowChkH, dlg, nullptr, g_hInst, nullptr);
+        SendMessageW(r.hChk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+        SendMessageW(r.hDel, WM_SETFONT, (WPARAM)g_fontSym, TRUE);   // ✕/🖊 须用 Segoe UI Symbol（YaHei 无字形画空白）
+        SendMessageW(r.hRe, WM_SETFONT, (WPARAM)g_fontSym, TRUE);
+        SendMessageW(r.hLbl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+        bool pre = (r.name == st->initPick);
+        if (pre) preMatch = true;
+        SendMessageW(r.hChk, BM_SETCHECK, pre ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    if (!preMatch && !st->rows.empty())   // 当前默认不在列表里（如刚改名）：兜底勾第一个
+        SendMessageW(st->rows[0].hChk, BM_SETCHECK, BST_CHECKED, 0);
+}
+// 事件解锁（WM_APP_JOBDONE）：远端操作完成 → 原地解锁，重建现有远端行拿最新列表，无关闭重开闪烁
+static void RemoteDlgUnlock(HWND h) {
+    RemoteCfgState* st = g_remoteDlgState;
+    if (!st || st->hDlg != h) return;
+    g_remoteDlgLocked = false;
+    SendMessageW(h, WM_SETREDRAW, FALSE, 0);      // 重建过程关重绘，避免行删建闪烁
+    for (auto& r : st->rows)
+        for (HWND hc : { r.hChk, r.hName, r.hUrl, r.hDel, r.hRe, r.hLbl })
+            if (hc) DestroyWindow(hc);
+    st->rows.clear();
+    st->nextIdx = 0;
+    for (auto& l : SplitLines(GitOut({ L"remote" }))) {   // 重读远端列表（刚完成的操作可能改过它）
+        std::wstring nm = Trim(l);
+        if (nm.empty()) continue;
+        RemoteRow rr;
+        rr.name = nm;
+        rr.url = Trim(GitOut({ L"config", L"--get", L"remote." + nm + L".url" }));
+        rr.url0 = rr.url;
+        rr.existing = true; rr.checked = true;
+        rr.cid = (int)st->rows.size();
+        st->rows.push_back(std::move(rr));
+    }
+    st->nextIdx = (int)st->rows.size();
+    st->initPick = DetectRemote();                // 以当前实际默认远端预勾
+    RemoteDlgBuildRows(h, st);
+    for (auto& r : st->rows)                      // 全部控件恢复可用
+        for (HWND hc : { r.hChk, r.hName, r.hUrl, r.hDel, r.hRe, r.hLbl })
+            if (hc) EnableWindow(hc, TRUE);
+    if (st->hAdd) EnableWindow(st->hAdd, TRUE);
+    if (st->hOk) EnableWindow(st->hOk, TRUE);
+    if (st->hHint) SetWindowTextW(st->hHint,
+        L"勾选一个作为默认远端（可不勾选，纯本机开发）；去勾选仅取消默认，行尾 🖊 改链接 / ✕ 删除远端：");
+    RemoteRowsRelayout(h, st);                    // 行数可能变化：重摆位并同步弹窗高度
+    SendMessageW(h, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(h, nullptr, TRUE);
+    SetFocus(st->rows.empty() ? st->hAdd : st->rows[0].hChk);
 }
 static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
     RemoteCfgState* st = (RemoteCfgState*)data;
@@ -2619,33 +2690,10 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
                : L"勾选一个作为默认远端（可不勾选，纯本机开发）；去勾选仅取消默认，行尾 🖊 改链接 / ✕ 删除远端：",
         WS_CHILD | WS_VISIBLE, mg, mg, w - 2 * mg, hintH, dlg, nullptr, g_hInst, nullptr);
     SendMessageW(hHint, WM_SETFONT, (WPARAM)g_fontMenu, TRUE);
-    int yy = mg + hintH + (int)(4 * g_scale);
-    int symW = (int)(26 * g_scale), symGap = (int)(4 * g_scale);
-    bool preMatch = false;
-    for (size_t i = 0; i < st.rows.size(); ++i) {
-        RemoteRow& r = st.rows[i];
-        std::wstring label = r.name + L" → " + (r.url.empty() ? L"（未取到链接）" : r.url);
-        r.hChk = CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-            mg, yy, (int)(22 * g_scale), rowChkH, dlg, (HMENU)(INT_PTR)(400 + (int)i), g_hInst, nullptr);
-        int xRe = w - mg - 2 * (symW + symGap);     // 🖊（✕ 在其右），与添加行一致的行尾布局
-        r.hRe = CreateWindowExW(0, L"BUTTON", L"🖊", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            xRe, yy, symW, rowEditH, dlg, (HMENU)(INT_PTR)(1400 + (int)i), g_hInst, nullptr);
-        r.hDel = CreateWindowExW(0, L"BUTTON", L"✕", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            w - mg - symW, yy, symW, rowEditH, dlg, (HMENU)(INT_PTR)(1300 + (int)i), g_hInst, nullptr);
-        r.hLbl = CreateWindowExW(0, L"STATIC", label.c_str(), WS_CHILD | WS_VISIBLE,
-            mg + (int)(26 * g_scale), yy, xRe - symGap - mg - (int)(26 * g_scale), rowChkH,
-            dlg, nullptr, g_hInst, nullptr);
-        SendMessageW(r.hChk, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
-        SendMessageW(r.hDel, WM_SETFONT, (WPARAM)g_fontSym, TRUE);   // ✕/🖊 须用 Segoe UI Symbol（YaHei 无字形画空白）
-        SendMessageW(r.hRe, WM_SETFONT, (WPARAM)g_fontSym, TRUE);
-        SendMessageW(r.hLbl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
-        bool pre = (r.name == defaultPick);
-        if (pre) preMatch = true;
-        SendMessageW(r.hChk, BM_SETCHECK, pre ? BST_CHECKED : BST_UNCHECKED, 0);
-        yy += rowChkH + gap;
-    }
-    if (!preMatch && nExist > 0)   // 当前默认不在列表里（如刚改名）：兜底勾第一个
-        SendMessageW(st.rows[0].hChk, BM_SETCHECK, BST_CHECKED, 0);
+    st.hHint = hHint;   // 事件解锁时恢复提示文字用
+    st.initPick = defaultPick;
+    RemoteDlgBuildRows(dlg, &st);
+    RemoteRowsRelayout(dlg, &st);   // 统一摆位（含 ＋/OK/Cancel 与弹窗高度）
     st.hAdd = CreateWindowExW(0, L"BUTTON", L"＋ 添加远端", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         mg, st.addY, (int)(110 * g_scale), addH, dlg, (HMENU)290, g_hInst, nullptr);
     int by = st.addY + addH + (int)(12 * g_scale);
@@ -3937,11 +3985,9 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_APP_JOBDONE:
         g_busy = false;
         RefreshStatusAsync();
-        // 事件解锁：配置远程弹窗因"远端操作进行中"处于只读态 → 自动关闭并以解锁态重开（重读远端列表，数据同步为最新）
-        if (g_remoteDlgLocked && g_hRemoteDlg && IsWindow(g_hRemoteDlg)) {
-            SendMessageW(g_hRemoteDlg, WM_CLOSE, 0, 0);   // 同步关闭旧弹窗（modal 循环随即退出）
-            OpRemoteCfg();                                // g_busy 已清零 → 新弹窗为解锁态
-        }
+        // 事件解锁：配置远程弹窗因"远端操作进行中"处于只读态 → 原地解锁并重建远端行（拿最新列表，无闪烁）
+        if (g_remoteDlgLocked && g_hRemoteDlg && IsWindow(g_hRemoteDlg))
+            RemoteDlgUnlock(g_hRemoteDlg);
         return 0;
     case WM_APP_STATUS:
         g_statusRunning = false;
