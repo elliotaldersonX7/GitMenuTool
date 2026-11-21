@@ -545,18 +545,48 @@ static std::vector<std::wstring> G(std::initializer_list<std::wstring> args) {
     for (auto& a : args) argv.push_back(a);
     return argv;
 }
+// 按仓库配置文件的出现顺序取远端列表（git remote 输出按字母排序；新增顺序更符合直觉）。
+// 直接解析 .git/config 的 [remote "名"] 段与 url 键；文件读不到（worktree 等）回退 git remote
+static std::vector<std::pair<std::wstring, std::wstring>> RemotesInOrder() {
+    std::vector<std::pair<std::wstring, std::wstring>> out;
+    std::ifstream f(fs::path(g_repo) / L".git" / L"config");
+    if (f) {
+        std::string ln;
+        std::wstring cur;                                     // 当前所在 [remote "名"] 段名
+        while (std::getline(f, ln)) {
+            std::wstring line(ln.begin(), ln.end());          // config 为 ASCII/UTF-8，按字节转宽
+            line = Trim(line);
+            if (line.empty() || line[0] == L';' || line[0] == L'#') continue;
+            if (line.front() == L'[') {                       // 段头
+                size_t q1 = line.find(L'"');
+                size_t q2 = (q1 == std::wstring::npos) ? std::wstring::npos : line.find(L'"', q1 + 1);
+                cur = (q1 != std::wstring::npos && q2 != std::wstring::npos && line.rfind(L"[remote", 0) == 0)
+                      ? line.substr(q1 + 1, q2 - q1 - 1) : L"";
+                continue;
+            }
+            if (!cur.empty() && line.rfind(L"url", 0) == 0) { // url 键：每段只取第一条（多 push url 忽略）
+                size_t eq = line.find(L'=');
+                if (eq != std::wstring::npos) out.push_back({ cur, Trim(line.substr(eq + 1)) });
+                cur.clear();
+            }
+        }
+        if (!out.empty()) return out;
+    }
+    for (auto& l : SplitLines(GitOut({ L"remote" }))) {       // 回退：git remote（字母序）
+        std::wstring nm = Trim(l);
+        if (nm.empty()) continue;
+        out.push_back({ nm, Trim(GitOut({ L"config", L"--get", L"remote." + nm + L".url" })) });
+    }
+    return out;
+}
 // 默认远端：优先当前分支上游远端（upstreamKnown 非空时直接用，省一次子进程）；否则第一个远端；无返回空
 static std::wstring DetectRemote(const std::wstring& upstreamKnown = L"") {
     if (g_repo.empty()) return L"";
-    std::vector<std::wstring> rems;
-    for (auto& l : SplitLines(GitOut({ L"remote" }))) {
-        std::wstring t = Trim(l);
-        if (!t.empty()) rems.push_back(t);
-    }
+    auto rems = RemotesInOrder();
     if (rems.empty()) return L"";
     // ① 用户在【配置远程】里选定的默认远端优先（写入仓库级配置 gittool.defaultremote）
     std::wstring picked = Trim(GitOut({ L"config", L"--get", L"gittool.defaultremote" }));
-    for (auto& r : rems) if (r == picked) return r;
+    for (auto& r : rems) if (r.first == picked) return r.first;
     // ② 上游分支对应的远端
     std::wstring up = !upstreamKnown.empty() ? upstreamKnown
                       : Trim(GitOut({ L"rev-parse", L"--abbrev-ref", L"--symbolic-full-name", L"@{u}" }));
@@ -564,10 +594,10 @@ static std::wstring DetectRemote(const std::wstring& upstreamKnown = L"") {
         size_t i = up.find(L'/');
         if (i != std::wstring::npos) {
             std::wstring rn = up.substr(0, i);
-            for (auto& r : rems) if (r == rn) return rn;
+            for (auto& r : rems) if (r.first == rn) return r.first;
         }
     }
-    return rems[0];
+    return rems[0].first;
 }
 
 // ============================ RichEdit 富文本 ===============================
@@ -2485,13 +2515,11 @@ static void RemoteDlgUnlock(HWND h) {
             if (hc) DestroyWindow(hc);
     st->rows.clear();
     st->nextIdx = 0;
-    for (auto& l : SplitLines(GitOut({ L"remote" }))) {   // 重读远端列表（刚完成的操作可能改过它）
-        std::wstring nm = Trim(l);
-        if (nm.empty()) continue;
+    for (auto& pr : RemotesInOrder()) {                   // 重读远端列表（刚完成的操作可能改过它），保持新增顺序
         RemoteRow rr;
-        rr.name = nm;
-        rr.url = Trim(GitOut({ L"config", L"--get", L"remote." + nm + L".url" }));
-        rr.name0 = nm; rr.url0 = rr.url;
+        rr.name = pr.first;
+        rr.url = pr.second;
+        rr.name0 = pr.first; rr.url0 = pr.second;
         rr.existing = true; rr.checked = true;
         rr.cid = (int)st->rows.size();
         st->rows.push_back(std::move(rr));
@@ -2721,13 +2749,10 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
     int addH = (int)(26 * g_scale), btnH = (int)(28 * g_scale);
     int w = (int)(520 * g_scale);
     RemoteCfgState st;
-    for (auto& l : SplitLines(GitOut({ L"remote" }))) {
-        std::wstring nm = Trim(l);
-        if (nm.empty()) continue;
-        std::wstring url = Trim(GitOut({ L"config", L"--get", L"remote." + nm + L".url" }));
+    for (auto& pr : RemotesInOrder()) {                   // 配置文件出现顺序（新增顺序），非字母序
         RemoteRow rr;
-        rr.name = nm; rr.url = url;
-        rr.name0 = nm; rr.url0 = url;               // 原始别名/链接：🖊 编辑后与当前值比对，变了才生成 rename/set-url
+        rr.name = pr.first; rr.url = pr.second;
+        rr.name0 = pr.first; rr.url0 = pr.second;         // 原始别名/链接：🖊 编辑后与当前值比对，变了才生成 rename/set-url
         rr.existing = true; rr.checked = true;
         rr.cid = (int)st.rows.size();               // 现有行 cid = 建行顺序（弹窗期间行不删除只标记，id 稳定）
         st.rows.push_back(std::move(rr));
@@ -2790,23 +2815,27 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
 static void OpRemoteCfg() {
     std::wstring defaultPick = g_remote;
     auto rows = AskRemoteCfg(g_main, defaultPick, g_busy);   // g_busy=远端操作进行中：弹窗只读，OK 禁用必然走 Cancel 无命令
-    std::vector<std::vector<std::wstring>> cmds;
+    std::vector<JobCmd> cmds;
     for (auto& r : rows) {
         if (r.existing && r.del) {
-            cmds.push_back(G({ L"remote", L"remove", r.name0 }));   // 仅显式 ✕ 才删；去勾选只是取消默认（按原始名删除）
+            cmds.push_back({ G({ L"remote", L"remove", r.name0 }), false });   // 仅显式 ✕ 才删；去勾选只是取消默认（按原始名删除）
             continue;
         }
         if (r.existing && !r.name.empty() && r.name != r.name0)
-            cmds.push_back(G({ L"remote", L"rename", r.name0, r.name }));   // 🖊 改过别名：先改名（后续 set-url 用新名）
+            cmds.push_back({ G({ L"remote", L"rename", r.name0, r.name }), false });   // 🖊 改过别名：先改名（后续 set-url 用新名）
         if (r.existing && r.hUrl && !r.url.empty() && r.url != r.url0)
-            cmds.push_back(G({ L"remote", L"set-url", r.name, r.url }));    // 🖊 改过链接才生成 set-url（rename 已先执行）
+            cmds.push_back({ G({ L"remote", L"set-url", r.name, r.url }), false });    // 🖊 改过链接才生成 set-url（rename 已先执行）
         if (!r.existing && !r.name.empty() && !r.url.empty())
-            cmds.push_back(G({ L"remote", L"add", r.name, r.url }));        // 草稿行：填了就加入（✕ 移除的不算）
+            cmds.push_back({ G({ L"remote", L"add", r.name, r.url }), false });        // 草稿行：填了就加入（✕ 移除的不算）
     }
-    if (!defaultPick.empty() && defaultPick != g_remote)
-        cmds.push_back(G({ L"config", L"--local", L"gittool.defaultremote", defaultPick }));
+    if (!defaultPick.empty() && defaultPick != g_remote) {
+        cmds.push_back({ G({ L"config", L"--local", L"gittool.defaultremote", defaultPick }), false });
+    } else if (defaultPick.empty()) {
+        // 全不勾 = 纯本机模式：清掉残留的默认远端配置，否则重开弹窗仍显示上次勾选
+        cmds.push_back({ G({ L"config", L"--local", L"--unset", L"gittool.defaultremote" }), true });   // 本就未设置时报错属正常，不阻断
+    }
     if (cmds.empty()) return;
-    ExecV(std::move(cmds));
+    ExecAsync(std::move(cmds));
     RefreshStatusAsync();   // 默认远端可能变化（被删/新增/手动选择），立即刷新
 }
 static void OpTagNew() {
