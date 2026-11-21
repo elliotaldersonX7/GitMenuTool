@@ -2501,8 +2501,7 @@ static void RemoteDlgBuildRows(HWND dlg, RemoteCfgState* st) {
         if (pre) preMatch = true;
         SendMessageW(r.hChk, BM_SETCHECK, pre ? BST_CHECKED : BST_UNCHECKED, 0);
     }
-    if (!preMatch && !st->rows.empty())   // 当前默认不在列表里（如刚改名）：兜底勾第一个
-        SendMessageW(st->rows[0].hChk, BM_SETCHECK, BST_CHECKED, 0);
+    // 不做"兜底勾第一个"：预勾只认显式选择（gittool.defaultremote），全不勾 = 纯本机模式要能持久显示
 }
 // 事件解锁（WM_APP_JOBDONE）：远端操作完成 → 原地解锁，重建现有远端行拿最新列表，无关闭重开闪烁
 static void RemoteDlgUnlock(HWND h) {
@@ -2525,7 +2524,7 @@ static void RemoteDlgUnlock(HWND h) {
         st->rows.push_back(std::move(rr));
     }
     st->nextIdx = (int)st->rows.size();
-    st->initPick = DetectRemote();                // 以当前实际默认远端预勾
+    st->initPick = Trim(GitOut({ L"config", L"--get", L"gittool.defaultremote" }));   // 只认显式选择：DetectRemote 的上游/首远端兜底会造成"全不勾仍预勾"的假象
     RemoteDlgBuildRows(h, st);
     for (auto& r : st->rows)                      // 全部控件恢复可用
         for (HWND hc : { r.hChk, r.hName, r.hUrl, r.hDel, r.hRe, r.hLbl })
@@ -2813,7 +2812,8 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
 }
 // 配置远程：OK 后统一生成命令——行内【删除】标记的现有远端 remote remove，勾选的新行 remote add；默认远端变更写仓库级配置
 static void OpRemoteCfg() {
-    std::wstring defaultPick = g_remote;
+    // 只认显式选择：若传 g_remote（带上游/首远端兜底），全不勾后重开仍会被兜底值预勾
+    std::wstring defaultPick = Trim(GitOut({ L"config", L"--get", L"gittool.defaultremote" }));
     auto rows = AskRemoteCfg(g_main, defaultPick, g_busy);   // g_busy=远端操作进行中：弹窗只读，OK 禁用必然走 Cancel 无命令
     std::vector<JobCmd> cmds;
     for (auto& r : rows) {
