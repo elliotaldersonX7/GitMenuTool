@@ -2403,6 +2403,10 @@ struct RemoteCfgState {
     bool done = false;
 };
 static const int REMOTE_UI_MAX = 10;   // 弹窗界面软上限（git 支持任意多个，超了用底部命令行）
+// 弹窗句柄/状态指针/锁定态：供 WM_APP_JOBDONE 事件解锁用（远端操作完成时自动以解锁态重开弹窗）
+static HWND g_hRemoteDlg = nullptr;
+static RemoteCfgState* g_remoteDlgState = nullptr;
+static bool g_remoteDlgLocked = false;
 // 行/按钮/弹窗高度统一重排（增删行后调用）；✕/🖊 统一在行尾（避免靠勾选框太近误删）
 static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
     int mg = (int)(14 * g_scale), rowChkH = (int)(22 * g_scale), rowEditH = (int)(24 * g_scale);
@@ -2566,6 +2570,9 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
         }
         return 0;
     }
+    case WM_DESTROY:
+        if (g_hRemoteDlg == h) { g_hRemoteDlg = nullptr; g_remoteDlgState = nullptr; }
+        return 0;
     case WM_CLOSE:
         st->done = true;
         DestroyWindow(h);
@@ -2606,6 +2613,7 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
         WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, ww, wh, parent, nullptr, g_hInst, nullptr);
     st.hDlg = dlg;
     SetWindowSubclass(dlg, RemoteCfgDlgSub, 1, (DWORD_PTR)&st);
+    g_hRemoteDlg = dlg; g_remoteDlgState = &st; g_remoteDlgLocked = locked;   // JOBDONE 事件解锁用
     HWND hHint = CreateWindowExW(0, L"STATIC",
         locked ? L"有远端操作进行中，完成后才能配置远端（当前内容只读）："
                : L"勾选一个作为默认远端（可不勾选，纯本机开发）；去勾选仅取消默认，行尾 🖊 改链接 / ✕ 删除远端：",
@@ -3929,6 +3937,11 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_APP_JOBDONE:
         g_busy = false;
         RefreshStatusAsync();
+        // 事件解锁：配置远程弹窗因"远端操作进行中"处于只读态 → 自动关闭并以解锁态重开（重读远端列表，数据同步为最新）
+        if (g_remoteDlgLocked && g_hRemoteDlg && IsWindow(g_hRemoteDlg)) {
+            SendMessageW(g_hRemoteDlg, WM_CLOSE, 0, 0);   // 同步关闭旧弹窗（modal 循环随即退出）
+            OpRemoteCfg();                                // g_busy 已清零 → 新弹窗为解锁态
+        }
         return 0;
     case WM_APP_STATUS:
         g_statusRunning = false;
