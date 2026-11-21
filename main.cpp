@@ -2223,13 +2223,23 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs(bool force = false) {
     // 本地tag VS 远端tag：本地最新：xxx 远端最新：xxx
     TagDiff td = ComputeTagDiff(force);
     std::vector<Seg> tg = { SegT(L"标签：", STAT_TXT, true) };
+    // 相同→双方绿色；不同→领先方橙色、落后方灰色
+    bool same = (td.localLatest == td.remoteLatest);
+    bool localLeads = false;
+    if (!same) {
+        if (td.localLatest.empty()) localLeads = false;
+        else if (td.remoteLatest.empty()) localLeads = true;
+        else localLeads = VersionCompare(td.localLatest, td.remoteLatest) > 0;
+    }
     tg.push_back(SegT(L" 本地：" + (td.localLatest.empty() ? std::wstring(L"（无）") : td.localLatest) + L" ",
-                      STAT_BLU, true, BG_BLU));
+                      same ? STAT_GRN : (localLeads ? STAT_ORG : STAT_DIM), false,
+                      same ? BG_GRN : (localLeads ? BG_YLW : 0)));
     if (g_remote.empty())
         tg.push_back(SegT(L" 远端：（未配置远端）", STAT_DIM));
     else if (td.netOk)
         tg.push_back(SegT(L" 远端：" + (td.remoteLatest.empty() ? std::wstring(L"（无）") : td.remoteLatest) + L" ",
-                          td.remoteLatest == td.localLatest ? STAT_DIM : STAT_BLU, true, BG_BLU));
+                          same ? STAT_GRN : (localLeads ? STAT_DIM : STAT_ORG), false,
+                          same ? BG_GRN : (localLeads ? 0 : BG_YLW)));
     else
         tg.push_back(SegT(L" 远端：未知（网络不可达，可配置代理）", STAT_DIM));
     lines->push_back(tg);
