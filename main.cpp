@@ -2387,7 +2387,7 @@ static void OpInitRepo() {
 // "本地名 + 链接" 新行，弹窗 Y 轴随内容自适应；界面软上限 10 个（git 本身无硬限制）
 struct RemoteRow {
     std::wstring name, url;
-    std::wstring url0;                            // 现有远端打开时的原始链接（🖊 改链接后比较，变了才生成 set-url）
+    std::wstring name0, url0;                     // 现有远端打开时的原始别名/链接（🖊 编辑后比对，变了才生成 rename/set-url）
     bool existing = false, checked = true;
     bool del = false;                             // 现有远端被行内【✕】标记：OK 时执行 remote remove（去勾选≠删除）
     int cid = -1;                                 // 行创建序号（删除/重编辑按钮定位用，新旧行统一）
@@ -2424,8 +2424,13 @@ static void RemoteRowsRelayout(HWND h, RemoteCfgState* st) {
             if (r.hChk) MoveWindow(r.hChk, mg, yy, (int)(22 * g_scale), rowChkH, TRUE);
             if (r.hRe) MoveWindow(r.hRe, xRe, yy, symW, rowEditH, TRUE);
             if (r.hDel) MoveWindow(r.hDel, wd - mg - symW, yy, symW, rowEditH, TRUE);
-            if (r.hLbl) MoveWindow(r.hLbl, xText, yy, contentRight - xText, rowChkH, TRUE);
-            if (r.hUrl) MoveWindow(r.hUrl, xText, yy, contentRight - xText, rowEditH, TRUE);
+            if (r.hName) {                              // 🖊 编辑态：别名+链接 两框（与添加行同款布局）
+                if (r.hName) MoveWindow(r.hName, xText, yy, nameW, rowEditH, TRUE);
+                if (r.hUrl) MoveWindow(r.hUrl, xText + nameW + (int)(6 * g_scale), yy,
+                    contentRight - xText - nameW - (int)(6 * g_scale), rowEditH, TRUE);
+            } else if (r.hLbl) {                        // 常态：名称 → 链接 静态文本
+                if (r.hLbl) MoveWindow(r.hLbl, xText, yy, contentRight - xText, rowChkH, TRUE);
+            }
             yy += rowChkH + gap;
         } else {
             int xName = mg + (int)(26 * g_scale);
@@ -2500,7 +2505,7 @@ static void RemoteDlgUnlock(HWND h) {
         RemoteRow rr;
         rr.name = nm;
         rr.url = Trim(GitOut({ L"config", L"--get", L"remote." + nm + L".url" }));
-        rr.url0 = rr.url;
+        rr.name0 = nm; rr.url0 = rr.url;
         rr.existing = true; rr.checked = true;
         rr.cid = (int)st->rows.size();
         st->rows.push_back(std::move(rr));
@@ -2581,19 +2586,19 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                 if (!r.existing) {                      // 新增草稿行：清空重填
                     if (r.hName) { SetWindowTextW(r.hName, L""); SetFocus(r.hName); }
                     if (r.hUrl) SetWindowTextW(r.hUrl, L"");
-                } else if (r.hLbl && !r.hUrl) {         // 现有远端：静态文本换成链接编辑框（预填当前链接）
+                } else if (r.hLbl && !r.hName) {        // 现有远端：静态文本换成 别名+链接 两个编辑框（预填原值）
                     DestroyWindow(r.hLbl);
                     r.hLbl = nullptr;
-                    int mg2 = (int)(14 * g_scale), symW2 = (int)(26 * g_scale), symGap2 = (int)(4 * g_scale);
-                    int wd2 = (int)(520 * g_scale);
-                    int xRe2 = wd2 - mg2 - 2 * (symW2 + symGap2), contentRight2 = xRe2 - symGap2;
+                    r.hName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", r.name.c_str(),
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0,
+                        (int)(90 * g_scale), (int)(24 * g_scale), h, (HMENU)(INT_PTR)(1100 + r.cid), g_hInst, nullptr);
                     r.hUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", r.url.c_str(),
-                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                        mg2 + (int)(26 * g_scale), 0, contentRight2 - mg2 - (int)(26 * g_scale), (int)(24 * g_scale),
-                        h, (HMENU)(INT_PTR)(1200 + r.cid), g_hInst, nullptr);
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0,
+                        (int)(300 * g_scale), (int)(24 * g_scale), h, (HMENU)(INT_PTR)(1200 + r.cid), g_hInst, nullptr);
+                    SendMessageW(r.hName, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
                     SendMessageW(r.hUrl, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
-                    RemoteRowsRelayout(h, st);          // 统一摆位（含换出的编辑框）
-                    SetFocus(r.hUrl);
+                    RemoteRowsRelayout(h, st);          // 统一摆位（与添加行同款布局）
+                    SetFocus(r.hName);
                 }
                 return 0;
             }
@@ -2626,10 +2631,25 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                     readEdit(r.hUrl, r.url);
                     if (r.existing && r.checked && !r.del) st->defaultPick = r.name;
                 }
-                // 校验：勾选的新行必须 本地名+链接 都填，且名字不与保留的默认远端重名
+                // 校验：别名非空且不重名（现有行改名/新行）；新行还须链接非空
                 bool bad = false;
                 for (auto& r : st->rows) {
-                    if (!r.existing && r.checked) {
+                    if (r.del) continue;
+                    const std::wstring& effName = r.existing ? r.name0 : std::wstring();   // 该行占用的旧名
+                    if (r.existing) {
+                        if (r.name.empty()) { Warn(h, Fmt(L"远端 [%s] 的本地别名不能为空。", r.name0.c_str())); bad = true; break; }
+                        if (r.name != r.name0) {   // 改了名：与其它行占用的名字查重
+                            for (auto& o : st->rows) {
+                                if (&o == &r || o.del) continue;
+                                const std::wstring& on = o.existing ? o.name0 : o.name;
+                                if (!on.empty() && on == r.name) {
+                                    Warn(h, Fmt(L"本地别名 [%s] 与其它远端重名。", r.name.c_str()));
+                                    bad = true; break;
+                                }
+                            }
+                            if (bad) break;
+                        }
+                    } else if (r.checked) {
                         if (r.name.empty() || r.url.empty()) { Warn(h, L"新增远端需要填写 本地名 和 链接（或取消勾选该行）。"); bad = true; break; }
                         if (r.name == st->defaultPick) { Warn(h, Fmt(L"本地名 [%s] 与保留的默认远端重名，请换一个。", r.name.c_str())); bad = true; break; }
                     }
@@ -2665,7 +2685,7 @@ static std::vector<RemoteRow> AskRemoteCfg(HWND parent, std::wstring& defaultPic
         std::wstring url = Trim(GitOut({ L"config", L"--get", L"remote." + nm + L".url" }));
         RemoteRow rr;
         rr.name = nm; rr.url = url;
-        rr.url0 = url;                              // 原始链接：🖊 改链接后与 url 比对，变了才生成 set-url
+        rr.name0 = nm; rr.url0 = url;               // 原始别名/链接：🖊 编辑后与当前值比对，变了才生成 rename/set-url
         rr.existing = true; rr.checked = true;
         rr.cid = (int)st.rows.size();               // 现有行 cid = 建行顺序（弹窗期间行不删除只标记，id 稳定）
         st.rows.push_back(std::move(rr));
@@ -2730,11 +2750,15 @@ static void OpRemoteCfg() {
     auto rows = AskRemoteCfg(g_main, defaultPick, g_busy);   // g_busy=远端操作进行中：弹窗只读，OK 禁用必然走 Cancel 无命令
     std::vector<std::vector<std::wstring>> cmds;
     for (auto& r : rows) {
-        if (r.existing && r.del)
-            cmds.push_back(G({ L"remote", L"remove", r.name }));   // 仅显式 ✕ 才删；去勾选只是取消默认
-        else if (r.existing && r.hUrl && !r.del && !r.url.empty() && r.url != r.url0)
-            cmds.push_back(G({ L"remote", L"set-url", r.name, r.url }));   // 🖊 改过链接才生成 set-url
-        else if (!r.existing && r.checked && !r.name.empty() && !r.url.empty())
+        if (r.existing && r.del) {
+            cmds.push_back(G({ L"remote", L"remove", r.name0 }));   // 仅显式 ✕ 才删；去勾选只是取消默认（按原始名删除）
+            continue;
+        }
+        if (r.existing && !r.name.empty() && r.name != r.name0)
+            cmds.push_back(G({ L"remote", L"rename", r.name0, r.name }));   // 🖊 改过别名：先改名（后续 set-url 用新名）
+        if (r.existing && r.hUrl && !r.url.empty() && r.url != r.url0)
+            cmds.push_back(G({ L"remote", L"set-url", r.name, r.url }));    // 🖊 改过链接才生成 set-url（rename 已先执行）
+        if (!r.existing && r.checked && !r.name.empty() && !r.url.empty())
             cmds.push_back(G({ L"remote", L"add", r.name, r.url }));
     }
     if (!defaultPick.empty() && defaultPick != g_remote)
