@@ -2559,8 +2559,10 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             r.cid = n;
             int symW = (int)(26 * g_scale), symGap = (int)(4 * g_scale);
             int xRe = wd - mg - 2 * (symW + symGap);     // 🖊（✕ 在其右），内容区让到它们左侧，防勾选时误触删除
-            int xName = mg + (int)(26 * g_scale);        // 草稿行无勾选框（勾选=默认远端，仅现有行），与现有行编辑态对齐
+            int xName = mg + (int)(26 * g_scale);
             int xUrl = xName + nameW + (int)(6 * g_scale);
+            r.hChk = CreateWindowExW(0, L"BUTTON", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                mg, st->addY, (int)(22 * g_scale), rowEditH, h, (HMENU)(INT_PTR)(400 + n), g_hInst, nullptr);
             r.hName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 xName, st->addY, nameW, rowEditH, h, (HMENU)(INT_PTR)(1100 + n), g_hInst, nullptr);
             r.hUrl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
@@ -2617,13 +2619,15 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             }
             return 0;
         }
-        if (id >= 400 && id < 400 + (int)st->rows.size() && code == BN_CLICKED) {   // 现有远端行：勾谁谁是默认远端（单选）——勾选某行时自动取消其它行勾选
-            int idx = id - 400;
-            if (idx < (int)st->rows.size() && st->rows[idx].existing && st->rows[idx].hChk
-                && SendMessageW(st->rows[idx].hChk, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-                for (auto& r : st->rows)
-                    if (r.existing && r.hChk && &r != &st->rows[idx])
-                        SendMessageW(r.hChk, BM_SETCHECK, BST_UNCHECKED, 0);
+        if (id >= 400 && id < 400 + (int)st->rows.size() + 20 && code == BN_CLICKED) {   // 勾选默认远端：现有行/草稿行统一单选互斥——勾谁谁是默认
+            int cid = id - 400;
+            for (auto& r : st->rows) {
+                if (r.cid == cid && r.hChk && SendMessageW(r.hChk, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                    for (auto& o : st->rows)
+                        if (&o != &r && o.hChk) SendMessageW(o.hChk, BM_SETCHECK, BST_UNCHECKED, 0);
+                    SetFocus(h);   // 焦点还给弹窗：空文本勾选框聚焦会画虚线框（之前红箭头指的那个）
+                    break;
+                }
             }
             return 0;
         }
@@ -2642,7 +2646,7 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                     };
                     readEdit(r.hName, r.name);
                     readEdit(r.hUrl, r.url);
-                    if (r.existing && r.checked && !r.del) st->defaultPick = r.name;
+                    if (r.checked && !r.del) st->defaultPick = r.name;   // 勾选的行（现有/新增均可）= 默认远端
                 }
                 // 校验：别名非空且不重名（现有行改名/新行）；新行还须链接非空
                 bool bad = false;
@@ -2663,7 +2667,10 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
                             if (bad) break;
                         }
                     } else {
-                        if (r.name.empty() && r.url.empty()) continue;   // 空草稿行：忽略不生成命令
+                        if (r.name.empty() && r.url.empty()) {
+                            if (r.checked) { Warn(h, L"勾选为默认远端的行需要填写 本地名 和 链接。"); bad = true; break; }
+                            continue;   // 空草稿行：忽略不生成命令
+                        }
                         if (r.name.empty() || r.url.empty()) { Warn(h, L"新增远端需要填写 本地名 和 链接（或点该行 ✕ 移除）。"); bad = true; break; }
                         if (r.name == st->defaultPick) { Warn(h, Fmt(L"本地名 [%s] 与保留的默认远端重名，请换一个。", r.name.c_str())); bad = true; break; }
                     }
