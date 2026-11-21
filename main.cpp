@@ -2562,7 +2562,9 @@ static LRESULT CALLBACK RemoteCfgDlgSub(HWND h, UINT msg, WPARAM w, LPARAM l, UI
             return 0;
         }
         if (id == 290 && code == BN_CLICKED) {           // ＋添加远端：追加一行（默认不勾选=暂不加入），弹窗加高
-            if ((int)st->rows.size() >= REMOTE_UI_MAX) {
+            int visible = 0;                             // 上限只数实际占位的行：✕ 标记删除的行不可见，不占计数
+            for (auto& r : st->rows) if (!(r.existing && r.del)) ++visible;
+            if (visible >= REMOTE_UI_MAX) {
                 Warn(h, Fmt(L"界面最多管理 %d 个远端（git 本身无限制，更多可用底部命令行）。", REMOTE_UI_MAX));
                 return 0;
             }
