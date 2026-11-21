@@ -428,23 +428,24 @@ static std::string HttpGetVia(bool useProxy, const std::wstring& url, void (*onP
     InternetCloseHandle(hOpen);
     return out;
 }
-// 检查更新取 JSON：直连优先，内容无 "tag_name" 字段（403/404 错误页）再走系统代理；都无效返回空
+// 检查更新取 JSON：系统代理优先（未配置代理时 WinINet PRECONFIG 自动等效直连），内容无
+// "tag_name" 字段（403/404 错误页）再走纯直连兜底；都无效返回空
 // rateLimited 出参：两路响应都是 GitHub 限流页时置 true（匿名 60 次/小时/IP），供文案区分
 static std::string HttpGetUtf8(const std::wstring& url, bool* rateLimited = nullptr) {
-    std::string s1 = HttpGetVia(false, url);
+    std::string s1 = HttpGetVia(true, url);
     if (s1.find("\"tag_name\"") != std::string::npos) return s1;
-    std::string s2 = HttpGetVia(true, url);
+    std::string s2 = HttpGetVia(false, url);
     if (s2.find("\"tag_name\"") != std::string::npos) return s2;
     if (rateLimited)
         *rateLimited = s1.find("rate limit") != std::string::npos
                     || s2.find("rate limit") != std::string::npos;
     return "";
 }
-// 下载 exe 二进制：直连优先（>100KB 视为有效，错误页只有几百字节），无效再走系统代理；onPct 透传进度回调
+// 下载 exe 二进制：系统代理优先（>100KB 视为有效，错误页只有几百字节），无效再走纯直连兜底；onPct 透传进度回调
 static std::string HttpDownload(const std::wstring& url, void (*onPct)(int) = nullptr) {
-    std::string s = HttpGetVia(false, url, onPct);
+    std::string s = HttpGetVia(true, url, onPct);
     if (s.size() > 100 * 1024) return s;
-    s = HttpGetVia(true, url, onPct);
+    s = HttpGetVia(false, url, onPct);
     if (s.size() > 100 * 1024) return s;
     return "";
 }
