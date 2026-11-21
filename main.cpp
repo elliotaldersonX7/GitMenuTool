@@ -2222,16 +2222,16 @@ static std::vector<std::vector<Seg>>* BuildStatusSegs(bool force = false) {
     lines->push_back(cm);
     // 本地tag VS 远端tag：本地最新：xxx 远端最新：xxx
     TagDiff td = ComputeTagDiff(force);
-    std::vector<Seg> tg = { SegT(L"本地tag VS 远端tag：", STAT_TXT, true) };
-    tg.push_back(SegT(L" 本地最新：" + (td.localLatest.empty() ? std::wstring(L"（无）") : td.localLatest) + L" ",
+    std::vector<Seg> tg = { SegT(L"标签：", STAT_TXT, true) };
+    tg.push_back(SegT(L" 本地：" + (td.localLatest.empty() ? std::wstring(L"（无）") : td.localLatest) + L" ",
                       STAT_BLU, true, BG_BLU));
     if (g_remote.empty())
-        tg.push_back(SegT(L" 远端最新：（未配置远端）", STAT_DIM));
+        tg.push_back(SegT(L" 远端：（未配置远端）", STAT_DIM));
     else if (td.netOk)
-        tg.push_back(SegT(L" 远端最新：" + (td.remoteLatest.empty() ? std::wstring(L"（无）") : td.remoteLatest) + L" ",
+        tg.push_back(SegT(L" 远端：" + (td.remoteLatest.empty() ? std::wstring(L"（无）") : td.remoteLatest) + L" ",
                           td.remoteLatest == td.localLatest ? STAT_DIM : STAT_BLU, true, BG_BLU));
     else
-        tg.push_back(SegT(L" 远端最新：未知（网络不可达，可配置代理）", STAT_DIM));
+        tg.push_back(SegT(L" 远端：未知（网络不可达，可配置代理）", STAT_DIM));
     lines->push_back(tg);
     g_statUrl.clear();   // 状态卡不再显示远端两行：别名/地址/默认勾选全部收敛到【配置远程】弹窗（打开即实时列出全部远端）
     return lines;
