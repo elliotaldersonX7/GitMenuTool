@@ -2883,17 +2883,25 @@ static void OpRemoteCfg() {
         if (!r.existing && !r.name.empty() && !r.url.empty())
             cmds.push_back({ G({ L"remote", L"add", r.name, r.url }), false });        // 草稿行：填了就加入（✕ 移除的不算）
     }
-    if (!defaultPick.empty() && defaultPick != g_remote) {
-        cmds.push_back({ G({ L"config", L"--local", L"gittool.defaultremote", defaultPick }), false });
-    } else if (defaultPick.empty()
-               && !Trim(GitOut({ L"config", L"--get", L"gittool.defaultremote" })).empty()) {
-        // 全不勾 = 纯本机模式：清掉残留的默认远端配置，否则重开弹窗仍显示上次勾选（确有残留才发，避免无用报错）
-        cmds.push_back({ G({ L"config", L"--local", L"--unset", L"gittool.defaultremote" }), true });   // 本就未设置时报错属正常，不阻断
+    // 默认远端配置同步写入（UI 线程直接执行）：不能混进异步批次——批次中任一命令失败会中止后续，
+    // 混在里面时勾选的默认远端就会因前序命令失败而丢失
+    if (!defaultPick.empty()) {
+        if (defaultPick != g_remote) {
+            OutSep(); OutCmd(L"git config --local gittool.defaultremote " + defaultPick);
+            RunGit(G({ L"config", L"--local", L"gittool.defaultremote", defaultPick }), g_repo, 30000);
+            OutTxt(L"默认远端: " + defaultPick);
+            g_remote = defaultPick;   // 同步生效：异步远端命令完成前的窗口期，推送等操作也指向新勾选的远端
+        }
+    } else if (!Trim(GitOut({ L"config", L"--get", L"gittool.defaultremote" })).empty()) {
+        // 全不勾 = 纯本机模式：清掉残留的默认远端配置，否则重开弹窗仍显示上次勾选
+        OutSep(); OutCmd(L"git config --local --unset gittool.defaultremote");
+        RunGit(G({ L"config", L"--local", L"--unset", L"gittool.defaultremote" }), g_repo, 30000);
+        OutTxt(L"默认远端: （无，纯本机模式）");
+        g_remote.clear();
     }
-    if (cmds.empty()) return;
+    if (cmds.empty()) { RefreshStatusAsync(); return; }
     ExecAsync(std::move(cmds));
-    // 刷新交给 WM_APP_JOBDONE（全部命令含默认远端配置写入完成后再刷）：
-    // 这里立刻刷新会抢在配置写入前读到旧值，出现"勾选了远端却显示未配置"的竞态
+    // 远端增删改命令的刷新交给 WM_APP_JOBDONE（全部完成后读到的才是新配置状态）
 }
 static void OpTagNew() {
     if (!EnsureRepo()) return;
