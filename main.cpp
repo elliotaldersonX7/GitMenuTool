@@ -76,7 +76,7 @@ static const wchar_t APP_TITLE[] = L"Git 菜单工具";
 #endif
 static const wchar_t APP_VERSION[] = APP_VERSION_STR;
 static const wchar_t APP_AUTHOR[] = L"liuaolin";
-static const wchar_t UPDATE_API_URL[] = L"https://api.github.com/repos/elliotaldersonX7/GitMenuTool/releases/latest";
+static const wchar_t UPDATE_API_URL[] = L"https://api.github.com/repos/elliotxts/GitMenuTool/releases/latest";
 static const wchar_t GITEA_HINT[] = L"https://github.com/用户名/仓库名.git";
 static const wchar_t PRETTY[] = L"format:%h %ad%d %s";
 static const wchar_t DATEFMT[] = L"format:%Y-%m-%d %H:%M";
@@ -1766,7 +1766,7 @@ static void ShowAboutDialog(const UpdateResult* pre) {
     s.bw = (int)(95 * g_scale);
     s.w = (int)(300 * g_scale);
     // 链接行整行显示不折行：按 9pt 字体实测文字宽度撑大弹窗最小宽度
-    const std::wstring linkText = L"github发布页：https://github.com/elliotaldersonX7/GitMenuTool/releases";
+    const std::wstring linkText = L"github发布页：https://github.com/elliotxts/GitMenuTool/releases";
     {
         HDC dc = GetDC(nullptr);
         HFONT of = (HFONT)SelectObject(dc, g_fontUISmall);
@@ -2844,8 +2844,8 @@ static void OpRemoteCfg() {
         }
         if (r.existing && !r.name.empty() && r.name != r.name0)
             cmds.push_back({ G({ L"remote", L"rename", r.name0, r.name }), false });   // 🖊 改过别名：先改名（后续 set-url 用新名）
-        if (r.existing && r.hUrl && !r.url.empty() && r.url != r.url0)
-            cmds.push_back({ G({ L"remote", L"set-url", r.name, r.url }), false });    // 🖊 改过链接才生成 set-url（rename 已先执行）
+        if (r.existing && !r.url.empty() && r.url != r.url0)
+            cmds.push_back({ G({ L"remote", L"set-url", r.name, r.url }), false });    // 🖊 改过链接才生成 set-url（失焦收起后 hUrl 已销毁，只比 url/url0）
         if (!r.existing && !r.name.empty() && !r.url.empty())
             cmds.push_back({ G({ L"remote", L"add", r.name, r.url }), false });        // 草稿行：填了就加入（✕ 移除的不算）
     }
